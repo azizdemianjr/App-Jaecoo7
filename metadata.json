@@ -1,0 +1,7 @@
+{
+  "name": "PHEV Calculator",
+  "description": "Calculadora inteligente de recarga e custos para veículos PHEV e elétricos com comparativo vs gasolina e tempos de carga.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
