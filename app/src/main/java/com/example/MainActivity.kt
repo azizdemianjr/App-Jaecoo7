@@ -31,6 +31,7 @@ import com.example.ui.NavigationTab
 import com.example.ui.components.*
 import com.example.ui.screens.CalculatorScreen
 import com.example.ui.screens.ChargingTimeScreen
+import com.example.ui.screens.ChartsScreen
 import com.example.ui.screens.EconomyScreen
 import com.example.ui.screens.InfoScreen
 import com.example.ui.screens.OdometerScreen
@@ -68,6 +69,7 @@ fun MainAppScreen(
     }
 
     Scaffold(
+        contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopHeaderBar(
                 state = uiState,
@@ -81,7 +83,7 @@ fun MainAppScreen(
                 currentTab = uiState.currentTab,
                 onTabSelected = { viewModel.setTab(it) },
                 language = uiState.language,
-                isPhev = uiState.selectedVehicle.type == VehicleType.PHEV
+                isPhev = true
             )
         },
         containerColor = VoltageSurface,
@@ -98,6 +100,7 @@ fun MainAppScreen(
                     NavigationTab.CALCULATOR -> CalculatorScreen(state = uiState, viewModel = viewModel)
                     NavigationTab.ECONOMY -> EconomyScreen(state = uiState, viewModel = viewModel)
                     NavigationTab.ODOMETER -> OdometerScreen(state = uiState, viewModel = viewModel)
+                    NavigationTab.CHARTS -> ChartsScreen(state = uiState, viewModel = viewModel)
                     NavigationTab.CHARGING_TIME -> ChargingTimeScreen(state = uiState, viewModel = viewModel)
                     NavigationTab.INFO -> InfoScreen(state = uiState, viewModel = viewModel)
                 }

@@ -1,0 +1,3 @@
+Backup: marco_v1
+Data: 2026-09-16
+Descrição: Estado estável com botões de atalho centralizados, cálculo do valor total da recarga em R$ abaixo do nível final (sem parênteses) e testes passando com sucesso.

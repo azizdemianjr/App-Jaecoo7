@@ -5,12 +5,17 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.AppPreferences
 import com.example.data.ChargingLocation
+import com.example.data.ExamplePhevTestData
+import com.example.data.Jaecoo8TestData
 import com.example.data.OdometerEntry
 import com.example.data.Vehicle
 import com.example.data.VehicleCatalog
+import com.example.data.VehicleOdometerDraft
 import com.example.data.VehicleSyncEngine
 import com.example.data.VehicleSyncResult
 import com.example.data.VehicleType
+import com.example.data.db.AppDatabase
+import com.example.data.db.TripRepository
 import com.example.data.extractImageUrl
 import com.example.ui.localization.AppDictionary
 import com.example.ui.localization.AppLanguage
@@ -18,6 +23,7 @@ import com.example.ui.localization.AppStrings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -45,17 +51,26 @@ data class AppUiState(
     val timeSocFinal: Int = 100,
     // Odometer / Estimativa PHEV section state (Exclusive to PHEV)
     val odometerEntries: List<OdometerEntry> = emptyList(),
-    val odometerTotalKm: Double = 100.0,
-    val odometerHevKm: Double = 40.0,
-    val odometerCustomElectricConsumption: Double = 18.0,
-    val odometerCustomGasolineConsumption: Double = 17.5,
+    val odometerFilterVehicleOnly: Boolean = true,
+    val odometerTotalKm: Double = 0.0,
+    val odometerHevKm: Double = 0.0,
+    val odometerCustomElectricConsumption: Double = 0.0,
+    val odometerCustomGasolineConsumption: Double = 0.0,
     val odometerUseHomeTariff: Boolean = true,
+    val odometerChargingLocation: ChargingLocation = ChargingLocation.HOME,
     val odometerTotalStartKm: Double = 0.0,
     val odometerTotalEndKm: Double = 0.0,
     val odometerHevStartKm: Double = 0.0,
     val odometerHevEndKm: Double = 0.0,
     val odometerFuelLiters: Double = 0.0,
     val odometerTripNote: String = "",
+    val odometerBatteryStartPercent: Double = 100.0,
+    val odometerBatteryMaxPercent: Double = 75.0,
+    val odometerRechargeCount: Int = 1,
+    val odometerRechargeLocations: List<ChargingLocation> = listOf(ChargingLocation.HOME),
+    val odometerRechargeBatteryPercents: List<Double> = emptyList(),
+    val odometerRechargeInitialBatteryPercents: List<Double> = emptyList(),
+    val odometerRechargePrices: List<Double> = emptyList(),
     val isSaveOdometerTripDialogOpen: Boolean = false,
     val isOdometerHistoryDialogOpen: Boolean = false,
     val isInitialOdometerDialogOpen: Boolean = false,
@@ -70,7 +85,7 @@ data class AppUiState(
     val vehicleBeingEdited: Vehicle? = null,
     val lastSyncTimestamp: Long = 0L,
     val syncSummaryResult: VehicleSyncResult? = null,
-    val pixKey: String = "14430966877",
+    val pixKey: String = "48565a78-f69d-4a0f-917d-f327331b6c6c",
     val toastMessage: String? = null
 ) {
     val strings: AppDictionary
@@ -341,51 +356,134 @@ data class AppUiState(
             }
         }
 
-    // Odometer / Estimativa PHEV calculations (Trip odometer & fuel measurement)
+    // Odometer / Estimativa calculations (Trip odometer & fuel measurement)
     val odometerDeltaTotalKm: Double
-        get() = (odometerTotalEndKm - odometerTotalStartKm).coerceAtLeast(0.0)
+        get() = if (odometerTotalEndKm > odometerTotalStartKm && odometerTotalEndKm > 0.0) {
+            odometerTotalEndKm - odometerTotalStartKm
+        } else 0.0
 
     val odometerDeltaHevKm: Double
-        get() = (odometerHevEndKm - odometerHevStartKm).coerceAtLeast(0.0)
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> 0.0
+            VehicleType.HEV -> odometerDeltaTotalKm
+            VehicleType.PHEV -> if (odometerDeltaTotalKm > 0.0 && odometerHevEndKm >= odometerHevStartKm && odometerHevEndKm > 0.0) {
+                odometerHevEndKm - odometerHevStartKm
+            } else 0.0
+        }
 
     val odometerEvStartKm: Double
-        get() = (odometerTotalStartKm - odometerHevStartKm).coerceAtLeast(0.0)
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> odometerTotalStartKm
+            VehicleType.HEV -> 0.0
+            VehicleType.PHEV -> if (odometerTotalStartKm > 0.0) (odometerTotalStartKm - odometerHevStartKm).coerceAtLeast(0.0) else 0.0
+        }
 
     val odometerEvEndKm: Double
-        get() = (odometerTotalEndKm - odometerHevEndKm).coerceAtLeast(0.0)
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> odometerTotalEndKm
+            VehicleType.HEV -> 0.0
+            VehicleType.PHEV -> if (odometerTotalEndKm > 0.0) (odometerTotalEndKm - odometerHevEndKm).coerceAtLeast(0.0) else 0.0
+        }
 
     val odometerDeltaEvKm: Double
-        get() = (odometerEvEndKm - odometerEvStartKm).coerceAtLeast(0.0)
-
-    val odometerAverageHevKmL: Double
-        get() = if (odometerFuelLiters > 0 && odometerDeltaHevKm > 0) {
-            odometerDeltaHevKm / odometerFuelLiters
-        } else 0.0
-
-    val odometerAverageHevL100km: Double
-        get() = if (odometerAverageHevKmL > 0) {
-            100.0 / odometerAverageHevKmL
-        } else 0.0
-
-    val odometerGlobalKmL: Double
-        get() = if (odometerFuelLiters > 0 && odometerDeltaTotalKm > 0) {
-            odometerDeltaTotalKm / odometerFuelLiters
-        } else 0.0
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> odometerDeltaTotalKm
+            VehicleType.HEV -> 0.0
+            VehicleType.PHEV -> if (odometerDeltaTotalKm > 0.0) (odometerDeltaTotalKm - odometerDeltaHevKm).coerceAtLeast(0.0) else 0.0
+        }
 
     val odometerEffectiveTotalKm: Double
-        get() = if (odometerDeltaTotalKm > 0) odometerDeltaTotalKm else if (odometerTotalKm > 0) odometerTotalKm else 0.0
+        get() = if (odometerDeltaTotalKm > 0) odometerDeltaTotalKm else 0.0
 
     val odometerEffectiveHevKm: Double
-        get() = if (odometerDeltaHevKm > 0) odometerDeltaHevKm else if (odometerHevKm > 0) odometerHevKm else 0.0
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> 0.0
+            VehicleType.HEV -> odometerEffectiveTotalKm
+            VehicleType.PHEV -> if (odometerEffectiveTotalKm <= 0.0) 0.0 else odometerDeltaHevKm.coerceAtMost(odometerEffectiveTotalKm)
+        }
 
     val odometerEffectiveEvKm: Double
-        get() = if (odometerDeltaEvKm > 0) odometerDeltaEvKm else (odometerEffectiveTotalKm - odometerEffectiveHevKm).coerceAtLeast(0.0)
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> odometerEffectiveTotalKm
+            VehicleType.HEV -> 0.0
+            VehicleType.PHEV -> if (odometerEffectiveTotalKm <= 0.0) 0.0 else (odometerEffectiveTotalKm - odometerEffectiveHevKm).coerceAtLeast(0.0)
+        }
+
+    val odometerEffectiveRechargeLocations: List<ChargingLocation>
+        get() {
+            val count = odometerRechargeCount.coerceAtLeast(1)
+            if (odometerRechargeLocations.isEmpty()) {
+                return List(count) { odometerChargingLocation }
+            }
+            if (odometerRechargeLocations.size < count) {
+                val last = odometerRechargeLocations.lastOrNull() ?: odometerChargingLocation
+                return odometerRechargeLocations + List(count - odometerRechargeLocations.size) { last }
+            }
+            return odometerRechargeLocations.take(count)
+        }
+
+    val odometerEffectiveRechargeInitialBatteryPercents: List<Double>
+        get() {
+            val count = odometerRechargeCount.coerceAtLeast(1)
+            if (odometerRechargeInitialBatteryPercents.isEmpty()) {
+                return List(count) { 25.0 }
+            }
+            if (odometerRechargeInitialBatteryPercents.size < count) {
+                val last = odometerRechargeInitialBatteryPercents.lastOrNull() ?: 25.0
+                return odometerRechargeInitialBatteryPercents + List(count - odometerRechargeInitialBatteryPercents.size) { last }
+            }
+            return odometerRechargeInitialBatteryPercents.take(count)
+        }
+
+    val odometerEffectiveRechargeBatteryPercents: List<Double>
+        get() {
+            val count = odometerRechargeCount.coerceAtLeast(1)
+            if (odometerRechargeBatteryPercents.isEmpty()) {
+                return List(count) { 100.0 }
+            }
+            if (odometerRechargeBatteryPercents.size < count) {
+                return odometerRechargeBatteryPercents + List(count - odometerRechargeBatteryPercents.size) { 100.0 }
+            }
+            return odometerRechargeBatteryPercents.take(count)
+        }
+
+    val odometerEffectiveRechargePrices: List<Double>
+        get() {
+            val count = odometerRechargeCount.coerceAtLeast(1)
+            val locs = odometerEffectiveRechargeLocations
+            return List(count) { i ->
+                val custom = odometerRechargePrices.getOrNull(i)
+                if (custom != null && custom >= 0.0) {
+                    custom
+                } else {
+                    when (locs.getOrElse(i) { ChargingLocation.HOME }) {
+                        ChargingLocation.HOME -> homeEnergyPrice
+                        ChargingLocation.STATION -> publicEnergyPrice
+                        ChargingLocation.NONE -> 0.0
+                    }
+                }
+            }
+        }
 
     val odometerEffectiveEnergyPrice: Double
-        get() = if (odometerUseHomeTariff) homeEnergyPrice else publicEnergyPrice
+        get() {
+            val totalKwh = odometerTotalEnergyKwh
+            val totalCost = odometerElectricCost
+            if (totalKwh > 0.0 && totalCost > 0.0) {
+                return totalCost / totalKwh
+            }
+            val prices = odometerEffectiveRechargePrices
+            return if (prices.isNotEmpty()) prices.average() else homeEnergyPrice
+        }
 
     val odometerEffectiveElectricConsumption: Double
-        get() = if (odometerCustomElectricConsumption > 0) odometerCustomElectricConsumption else selectedVehicle.electricConsumptionKwh100km
+        get() = if (odometerCustomElectricConsumption > 0) {
+            odometerCustomElectricConsumption
+        } else if (selectedVehicle.electricConsumptionKwh100km > 0) {
+            selectedVehicle.electricConsumptionKwh100km
+        } else {
+            15.0
+        }
 
     val odometerEffectiveGasolineConsumption: Double
         get() = if (odometerCustomGasolineConsumption > 0) {
@@ -393,27 +491,222 @@ data class AppUiState(
         } else if (selectedVehicle.gasolineConsumptionKmL > 0) {
             selectedVehicle.gasolineConsumptionKmL
         } else {
-            17.5
+            16.0
         }
+
+    val odometerEvReservePercent: Double
+        get() = 25.0
+
+    val odometerTotalUsableBatteryPercent: Double
+        get() {
+            val locs = odometerEffectiveRechargeLocations
+            val finals = odometerEffectiveRechargeBatteryPercents
+            val inits = odometerEffectiveRechargeInitialBatteryPercents
+            val reservePercent = if (selectedVehicle.type == VehicleType.PHEV) odometerEvReservePercent else 0.0
+            val activeIndices = locs.indices.filter { locs[it] != ChargingLocation.NONE }
+            if (activeIndices.isEmpty()) return 0.0
+            var totalP = 0.0
+            for (idx in activeIndices.indices) {
+                val i = activeIndices[idx]
+                val pFinal = finals.getOrElse(i) { 100.0 }
+                val usableP = if (idx == activeIndices.size - 1) {
+                    (pFinal - reservePercent).coerceIn(0.0, 100.0)
+                } else {
+                    val nextI = activeIndices[idx + 1]
+                    val nextInit = inits.getOrElse(nextI) { 0.0 }
+                    val deltaToNext = (pFinal - nextInit).coerceAtLeast(0.0)
+                    val leg0 = if (idx == 0) {
+                        val pInit = inits.getOrElse(i) { 25.0 }
+                        if (pFinal < 100.0) {
+                            (100.0 - pFinal).coerceAtLeast(0.0)
+                        } else if (pInit > reservePercent) {
+                            (100.0 - pInit).coerceAtLeast(0.0)
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    }
+                    leg0 + deltaToNext
+                }
+                totalP += usableP
+            }
+            return totalP
+        }
+
+    val odometerUsableBatteryPercent: Double
+        get() = if (odometerRechargeCount > 1) odometerTotalUsableBatteryPercent else (odometerBatteryStartPercent - odometerEvReservePercent).coerceIn(0.0, 100.0)
+
+    // Distância EV máxima que a recarga externa da bateria pode fornecer
+    val odometerMaxRechargeEvKm: Double
+        get() {
+            if (selectedVehicle.type == VehicleType.HEV) return 0.0
+            if (selectedVehicle.type == VehicleType.BEV) {
+                val hasRecharge = odometerEffectiveRechargeLocations.any { it != ChargingLocation.NONE }
+                if (!hasRecharge) {
+                    return if (odometerEffectiveElectricConsumption > 0) (selectedVehicle.batteryCapacityKwh / odometerEffectiveElectricConsumption) * 100.0 else odometerEffectiveTotalKm
+                }
+            }
+            val hasRecharge = odometerEffectiveRechargeLocations.any { it != ChargingLocation.NONE }
+            if (!hasRecharge || odometerEffectiveElectricConsumption <= 0.0) {
+                return 0.0
+            }
+            val totalUsableKwh = selectedVehicle.batteryCapacityKwh * (odometerTotalUsableBatteryPercent / 100.0)
+            return if (totalUsableKwh > 0.0) (totalUsableKwh / odometerEffectiveElectricConsumption) * 100.0 else 0.0
+        }
+
+    // Km elétricos realmente supridos pela recarga da tomada
+    val odometerRechargeEvKm: Double
+        get() = when (selectedVehicle.type) {
+            VehicleType.HEV -> 0.0
+            VehicleType.BEV, VehicleType.PHEV -> if (odometerEffectiveTotalKm <= 0.0) 0.0 else odometerEffectiveEvKm.coerceAtMost(odometerMaxRechargeEvKm)
+        }
+
+    // Km elétricos adicionais (além da recarga da tomada), que excedem a capacidade de recarga (EV gerado pelo motor e regeneração)
+    val odometerExcessEvKm: Double
+        get() = when (selectedVehicle.type) {
+            VehicleType.HEV -> 0.0
+            VehicleType.BEV, VehicleType.PHEV -> if (odometerEffectiveTotalKm <= 0.0) 0.0 else (odometerEffectiveEvKm - odometerRechargeEvKm).coerceAtLeast(0.0)
+        }
+
+    // Indica se o trajeto rodou em modo elétrico mas a distância EV excedeu a capacidade de recarga
+    val odometerIsPureEvWithExcess: Boolean
+        get() = (selectedVehicle.type == VehicleType.BEV || (selectedVehicle.type == VehicleType.PHEV && odometerEffectiveHevKm <= 0.0 && odometerFuelLiters <= 0.0)) && odometerEffectiveTotalKm > 0.0 && odometerExcessEvKm > 0.0
+
+    // Km totais sustentados pelo combustível (HEV informado + EV gerado pelo motor a combustão e regeneração).
+    val odometerEffectiveFuelKm: Double
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> 0.0
+            VehicleType.HEV -> odometerEffectiveTotalKm
+            VehicleType.PHEV -> when {
+                odometerEffectiveHevKm > 0.0 -> (odometerEffectiveHevKm + odometerExcessEvKm).coerceAtLeast(0.0)
+                odometerFuelLiters > 0.0 && odometerEffectiveTotalKm > 0.0 -> (odometerEffectiveTotalKm - odometerRechargeEvKm).coerceAtLeast(0.0)
+                else -> 0.0
+            }
+        }
+
+    // Média de consumo HEV (km/L): Km sustentados por combustível ÷ Litros abastecidos/utilizados
+    val odometerAverageHevKmL: Double
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> 0.0
+            VehicleType.HEV -> if (odometerFuelLiters > 0 && odometerDeltaTotalKm > 0) {
+                odometerDeltaTotalKm / odometerFuelLiters
+            } else if (selectedVehicle.gasolineConsumptionKmL > 0) {
+                selectedVehicle.gasolineConsumptionKmL
+            } else 0.0
+            VehicleType.PHEV -> if (odometerFuelLiters > 0 && odometerEffectiveFuelKm > 0) {
+                odometerEffectiveFuelKm / odometerFuelLiters
+            } else 0.0
+        }
+
+    val odometerAverageHevL100km: Double
+        get() = if (odometerAverageHevKmL > 0) {
+            100.0 / odometerAverageHevKmL
+        } else 0.0
+
+    val odometerGlobalKmL: Double
+        get() = if (selectedVehicle.type == VehicleType.BEV) 0.0
+        else if (odometerFuelLiters > 0 && odometerDeltaTotalKm > 0) {
+            odometerDeltaTotalKm / odometerFuelLiters
+        } else 0.0
 
     val odometerTotalEnergyKwh: Double
         get() {
-            val rawKwh = (odometerEffectiveEvKm * odometerEffectiveElectricConsumption / 100.0)
-            val maxKwh = if (selectedVehicle.batteryCapacityKwh > 0) selectedVehicle.batteryCapacityKwh * 0.75 else 0.0
-            return if (maxKwh > 0) rawKwh.coerceAtMost(maxKwh) else rawKwh
+            if (odometerEffectiveTotalKm <= 0.0 || selectedVehicle.type == VehicleType.HEV) return 0.0
+            val hasRecharge = odometerEffectiveRechargeLocations.any { it != ChargingLocation.NONE }
+            if (selectedVehicle.type == VehicleType.BEV && !hasRecharge) {
+                return odometerEffectiveEvKm * odometerEffectiveElectricConsumption / 100.0
+            }
+            if (!hasRecharge) return 0.0
+            val totalMaxKwh = selectedVehicle.batteryCapacityKwh * (odometerTotalUsableBatteryPercent / 100.0)
+            if (totalMaxKwh <= 0.0) return 0.0
+            val rawKwh = odometerRechargeEvKm * odometerEffectiveElectricConsumption / 100.0
+            return rawKwh.coerceAtMost(totalMaxKwh)
         }
 
     val odometerTotalGasolineLiters: Double
-        get() = if (odometerFuelLiters > 0) odometerFuelLiters else if (odometerEffectiveGasolineConsumption > 0) odometerEffectiveHevKm / odometerEffectiveGasolineConsumption else 0.0
+        get() = when (selectedVehicle.type) {
+            VehicleType.BEV -> 0.0
+            VehicleType.HEV -> if (odometerFuelLiters > 0) odometerFuelLiters
+                else if (selectedVehicle.gasolineConsumptionKmL > 0 && odometerEffectiveTotalKm > 0) odometerEffectiveTotalKm / selectedVehicle.gasolineConsumptionKmL
+                else 0.0
+            VehicleType.PHEV -> if (odometerEffectiveTotalKm <= 0.0) 0.0
+                else if (odometerFuelLiters > 0) odometerFuelLiters
+                else if (odometerEffectiveHevKm <= 0.0) 0.0
+                else if (odometerEffectiveGasolineConsumption > 0 && odometerEffectiveFuelKm > 0) {
+                    odometerEffectiveFuelKm / odometerEffectiveGasolineConsumption
+                } else 0.0
+        }
 
     val odometerElectricCost: Double
-        get() = odometerTotalEnergyKwh * odometerEffectiveEnergyPrice
+        get() {
+            if (odometerEffectiveTotalKm <= 0.0 || selectedVehicle.type == VehicleType.HEV) return 0.0
+            val locs = odometerEffectiveRechargeLocations
+            val finals = odometerEffectiveRechargeBatteryPercents
+            val inits = odometerEffectiveRechargeInitialBatteryPercents
+            val prices = odometerEffectiveRechargePrices
+            val activeIndices = locs.indices.filter { locs[it] != ChargingLocation.NONE }
+            if (activeIndices.isEmpty()) {
+                return if (selectedVehicle.type == VehicleType.BEV) {
+                    odometerTotalEnergyKwh * homeEnergyPrice
+                } else 0.0
+            }
+            val reservePercent = if (selectedVehicle.type == VehicleType.PHEV) odometerEvReservePercent else 0.0
+            var remainingKwh = odometerTotalEnergyKwh
+            var cost = 0.0
+            for (idx in activeIndices.indices) {
+                if (remainingKwh <= 0.0) break
+                val i = activeIndices[idx]
+                val loc = locs[i]
+                val pFinal = finals.getOrElse(i) { 100.0 }
+                val usableP = if (idx == activeIndices.size - 1) {
+                    (pFinal - reservePercent).coerceIn(0.0, 100.0)
+                } else {
+                    val nextI = activeIndices[idx + 1]
+                    val nextInit = inits.getOrElse(nextI) { 0.0 }
+                    val deltaToNext = (pFinal - nextInit).coerceAtLeast(0.0)
+                    val leg0 = if (idx == 0) {
+                        val pInit = inits.getOrElse(i) { 25.0 }
+                        if (pFinal < 100.0) {
+                            (100.0 - pFinal).coerceAtLeast(0.0)
+                        } else if (pInit > reservePercent) {
+                            (100.0 - pInit).coerceAtLeast(0.0)
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    }
+                    leg0 + deltaToNext
+                }
+                val kwhPerRecharge = if (selectedVehicle.batteryCapacityKwh > 0) {
+                    selectedVehicle.batteryCapacityKwh * (usableP / 100.0)
+                } else 0.0
+                val kwh = if (kwhPerRecharge > 0) remainingKwh.coerceAtMost(kwhPerRecharge) else remainingKwh
+                val price = prices.getOrElse(i) {
+                    when (loc) {
+                        ChargingLocation.HOME -> homeEnergyPrice
+                        ChargingLocation.STATION -> publicEnergyPrice
+                        ChargingLocation.NONE -> 0.0
+                    }
+                }
+                cost += kwh * price
+                remainingKwh -= kwh
+            }
+            if (remainingKwh > 0.0) {
+                cost += remainingKwh * homeEnergyPrice
+            }
+            return cost
+        }
 
     val odometerGasolineCost: Double
-        get() = odometerTotalGasolineLiters * gasolinePrice
+        get() = if (selectedVehicle.type == VehicleType.BEV || odometerEffectiveTotalKm <= 0.0) 0.0
+        else if (selectedVehicle.type == VehicleType.HEV) odometerTotalGasolineLiters * gasolinePrice
+        else if (odometerEffectiveHevKm <= 0.0 && odometerFuelLiters <= 0.0) 0.0
+        else odometerTotalGasolineLiters * gasolinePrice
 
     val odometerTotalTripCost: Double
-        get() = odometerElectricCost + odometerGasolineCost
+        get() = if (odometerEffectiveTotalKm <= 0.0) 0.0 else odometerElectricCost + odometerGasolineCost
 
     val odometerCostPerKm: Double
         get() = if (odometerEffectiveTotalKm > 0) odometerTotalTripCost / odometerEffectiveTotalKm else 0.0
@@ -422,23 +715,30 @@ data class AppUiState(
         get() = odometerCostPerKm * 100.0
 
     val odometerEquivalentKmL: Double
-        get() = if (odometerTotalTripCost > 0 && gasolinePrice > 0) {
+        get() = if (odometerTotalTripCost > 0 && gasolinePrice > 0 && odometerEffectiveTotalKm > 0) {
             odometerEffectiveTotalKm / (odometerTotalTripCost / gasolinePrice)
         } else 0.0
 
     val odometerCost100PercentGas: Double
         get() {
-            val effGas = if (selectedVehicle.gasolineConsumptionKmL > 0) selectedVehicle.gasolineConsumptionKmL else customComparisonGasKmL
+            if (odometerEffectiveTotalKm <= 0.0) return 0.0
+            val effGas = when (selectedVehicle.type) {
+                VehicleType.BEV -> 12.0
+                VehicleType.HEV -> 10.0
+                VehicleType.PHEV -> if (selectedVehicle.gasolineConsumptionKmL > 0) selectedVehicle.gasolineConsumptionKmL else customComparisonGasKmL
+            }
             return if (effGas > 0) (odometerEffectiveTotalKm / effGas) * gasolinePrice else 0.0
         }
 
     val odometerSavingsVsGas: Double
-        get() = (odometerCost100PercentGas - odometerTotalTripCost).coerceAtLeast(0.0)
+        get() = if (odometerEffectiveTotalKm <= 0.0) 0.0 else (odometerCost100PercentGas - odometerTotalTripCost).coerceAtLeast(0.0)
 
     val odometerSavingsPercent: Double
-        get() = if (odometerCost100PercentGas > 0) {
+        get() = if (odometerEffectiveTotalKm <= 0.0 || odometerCost100PercentGas <= 0) {
+            0.0
+        } else {
             ((odometerSavingsVsGas / odometerCost100PercentGas) * 100.0).coerceIn(0.0, 100.0)
-        } else 0.0
+        }
 
     val odometerEvPercent: Double
         get() = if (odometerEffectiveTotalKm > 0) {
@@ -456,18 +756,26 @@ data class AppUiState(
             return gasSavedLiters * 2.31
         }
 
+    // Filtered odometer entries (by vehicle or all)
+    val currentVehicleOdometerEntries: List<OdometerEntry>
+        get() = if (odometerFilterVehicleOnly) {
+            odometerEntries.filter { it.matchesVehicle(selectedVehicle) }
+        } else {
+            odometerEntries
+        }
+
     // Accumulated history metrics
     val odometerAccumulatedTotalKm: Double
-        get() = odometerEntries.sumOf { it.totalKm }
+        get() = currentVehicleOdometerEntries.sumOf { it.totalKm }
 
     val odometerAccumulatedEvKm: Double
-        get() = odometerEntries.sumOf { it.evKm }
+        get() = currentVehicleOdometerEntries.sumOf { it.evKm }
 
     val odometerAccumulatedSavings: Double
-        get() = odometerEntries.sumOf { it.savingsVsGas }
+        get() = currentVehicleOdometerEntries.sumOf { it.savingsVsGas }
 
     val odometerAccumulatedTotalCost: Double
-        get() = odometerEntries.sumOf { it.totalCost }
+        get() = currentVehicleOdometerEntries.sumOf { it.totalCost }
 
     val odometerAccumulatedEvPercent: Double
         get() = if (odometerAccumulatedTotalKm > 0) {
@@ -479,6 +787,7 @@ enum class NavigationTab {
     CALCULATOR,
     ECONOMY,
     ODOMETER,
+    CHARTS,
     CHARGING_TIME,
     INFO
 }
@@ -510,9 +819,74 @@ fun formatNumber(amount: Double, decimals: Int = 2, language: AppLanguage = AppL
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = AppPreferences(application)
+    private val database = AppDatabase.getInstance(application)
+    private val tripRepository = TripRepository(database.tripDao())
 
     private val _uiState = MutableStateFlow(createInitialState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            // 1. Migração sem perda de dados: migra viagens antigas salvas em SharedPreferences para o banco Room
+            val legacyEntries = prefs.getOdometerEntries()
+            if (legacyEntries.isNotEmpty()) {
+                tripRepository.migrateLegacyEntries(legacyEntries)
+            }
+
+            // 2. Seeding de teste de 1 ano para o carro Exemplo PHEV e limpeza de dados fictícios do Jaecoo 8
+            launch {
+                try {
+                    val currentTrips = tripRepository.allTrips.first()
+                    // Se existirem viagens antigas de teste vinculadas ao Jaecoo 8, remove-as para deixá-lo limpo
+                    val hasJaecoo8Mock = currentTrips.any {
+                        it.vehicleId == "jaecoo_8" && (it.id.startsWith("jaecoo8_mock_trip_") || it.id.contains("mock"))
+                    }
+                    if (hasJaecoo8Mock) {
+                        tripRepository.deleteTripsByVehicle("jaecoo_8", "Jaecoo 8 PHEV")
+                    }
+
+                    // Se não existirem viagens atreladas ao Exemplo PHEV e o app estava vazio ou tinha mock antigo, semeia o Exemplo PHEV
+                    val hasExampleTrips = currentTrips.any { it.vehicleId == ExamplePhevTestData.VEHICLE_ID }
+                    if (!hasExampleTrips && (currentTrips.isEmpty() || hasJaecoo8Mock || legacyEntries.isEmpty())) {
+                        val testTrips = ExamplePhevTestData.generateOneYearTrips()
+                        tripRepository.insertTrips(testTrips)
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("MainViewModel", "Erro ao carregar dados de teste do Exemplo PHEV", e)
+                }
+            }
+
+            // 3. Coleta reativa contínua do banco de dados Room
+            tripRepository.allTrips.collect { roomTrips ->
+                _uiState.update { current ->
+                    val updated = current.copy(odometerEntries = roomTrips)
+                    val isExample = updated.selectedVehicle.id == ExamplePhevTestData.VEHICLE_ID
+                    val needsBaseline = updated.odometerTotalStartKm <= 0.0 || (isExample && (updated.odometerTotalStartKm <= 0.0 || updated.odometerHevStartKm <= 0.0))
+                    if (needsBaseline) {
+                        val vehicleEntries = roomTrips.filter { it.matchesVehicle(updated.selectedVehicle) }
+                        val lastTrip = vehicleEntries.maxByOrNull { it.timestamp }
+                        if (lastTrip != null && lastTrip.totalEndKm > 0.0) {
+                            val startTot = lastTrip.totalEndKm
+                            val startHev = if (updated.selectedVehicle.type == VehicleType.PHEV) {
+                                if (lastTrip.hevEndKm > 0) lastTrip.hevEndKm else lastTrip.hevStartKm
+                            } else 0.0
+                            updated.copy(
+                                odometerTotalStartKm = startTot,
+                                odometerHevStartKm = startHev
+                            )
+                        } else if (isExample) {
+                            updated.copy(
+                                odometerTotalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+                                odometerHevStartKm = ExamplePhevTestData.LAST_HEV_END_KM
+                            )
+                        } else updated
+                    } else updated
+                }
+                // Manter backup de segurança sincronizado
+                prefs.saveOdometerEntries(roomTrips)
+            }
+        }
+    }
 
     private fun createInitialState(): AppUiState {
         val rawSaved = prefs.getVehiclesList()
@@ -524,9 +898,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             VehicleCatalog.defaultVehicles
         }
         val savedVehicleId = prefs.getSelectedVehicleId()
-        val selected = savedVehicles.find { it.id == savedVehicleId }
-            ?: savedVehicles.firstOrNull()
-            ?: VehicleCatalog.defaultVehicles.first()
+        val selected = if (!savedVehicleId.isNullOrBlank()) {
+            savedVehicles.find { it.id == savedVehicleId }
+        } else {
+            // Se nenhuma seleção anterior existir (primeira vez), define o Exemplo PHEV como padrão
+            savedVehicles.find { it.id == ExamplePhevTestData.VEHICLE_ID }
+        } ?: savedVehicles.find { it.id == ExamplePhevTestData.VEHICLE_ID }
+          ?: savedVehicles.firstOrNull()
+          ?: VehicleCatalog.defaultVehicles.first()
         val savedLangCode = prefs.getLanguage()
         val language = AppLanguage.fromCode(savedLangCode)
         val savedOdometerEntries = prefs.getOdometerEntries()
@@ -537,15 +916,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         var savedOdometerFuelLiters = prefs.getOdometerDraftFuelLiters()
         val savedOdometerTripNote = prefs.getOdometerDraftTripNote()
 
-        // Limpar dados legados de mock para que o total atual e o hev atual comecem sem valores
+        // Limpar dados legados de mock ou se o total atual for menor ou igual ao inicial
         if ((savedOdometerTotalStartKm == 12000.0 && savedOdometerTotalEndKm == 12650.0) ||
             (savedOdometerTotalEndKm == 1000.0 && savedOdometerHevEndKm == 100.0) ||
-            (savedOdometerEntries.isEmpty() && savedOdometerTotalEndKm <= savedOdometerTotalStartKm)
+            (savedOdometerTotalEndKm <= savedOdometerTotalStartKm)
         ) {
             savedOdometerTotalEndKm = 0.0
             savedOdometerHevEndKm = 0.0
             savedOdometerFuelLiters = 0.0
             prefs.saveOdometerDraft(savedOdometerTotalStartKm, 0.0, savedOdometerHevStartKm, 0.0, 0.0, "")
+        }
+
+        val vehicleDraft = prefs.getVehicleOdometerDraft(selected.id)
+        if (vehicleDraft != null && vehicleDraft.totalStartKm > 0.0) {
+            savedOdometerTotalStartKm = vehicleDraft.totalStartKm
+            savedOdometerTotalEndKm = vehicleDraft.totalEndKm
+            savedOdometerHevStartKm = vehicleDraft.hevStartKm
+            savedOdometerHevEndKm = vehicleDraft.hevEndKm
+            savedOdometerFuelLiters = vehicleDraft.fuelLiters
+        } else {
+            val vehicleEntries = savedOdometerEntries.filter { it.matchesVehicle(selected) }
+            val lastTrip = vehicleEntries.maxByOrNull { it.timestamp }
+            if (lastTrip != null && lastTrip.totalEndKm > 0.0) {
+                savedOdometerTotalStartKm = lastTrip.totalEndKm
+                savedOdometerHevStartKm = if (selected.type == VehicleType.PHEV) {
+                    if (lastTrip.hevEndKm > 0) lastTrip.hevEndKm else lastTrip.hevStartKm
+                } else 0.0
+            } else if (selected.id == ExamplePhevTestData.VEHICLE_ID) {
+                savedOdometerTotalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM
+                savedOdometerHevStartKm = ExamplePhevTestData.LAST_HEV_END_KM
+            }
+        }
+
+        // Se for o Exemplo PHEV e o odômetro anterior ainda não estiver definido, aplica a quilometragem de 1 ano
+        if (selected.id == ExamplePhevTestData.VEHICLE_ID && savedOdometerTotalStartKm <= 0.0) {
+            savedOdometerTotalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM
+            savedOdometerHevStartKm = ExamplePhevTestData.LAST_HEV_END_KM
         }
 
         return AppUiState(
@@ -571,6 +977,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             odometerHevEndKm = savedOdometerHevEndKm,
             odometerFuelLiters = savedOdometerFuelLiters,
             odometerTripNote = savedOdometerTripNote,
+            odometerBatteryStartPercent = prefs.getOdometerBatteryStartPercent(),
+            odometerBatteryMaxPercent = (prefs.getOdometerBatteryStartPercent() - 25.0).coerceAtLeast(0.0),
+            odometerChargingLocation = prefs.getOdometerChargingLocation(),
+            odometerUseHomeTariff = (prefs.getOdometerChargingLocation() == ChargingLocation.HOME),
+            odometerRechargeCount = prefs.getOdometerRechargeCount(),
+            odometerRechargeLocations = prefs.getOdometerRechargeLocations(),
+            odometerRechargeBatteryPercents = prefs.getOdometerRechargeBatteryPercents(),
+            odometerRechargeInitialBatteryPercents = prefs.getOdometerRechargeInitialBatteryPercents(),
+            odometerRechargePrices = prefs.getOdometerRechargePrices(),
             lastSyncTimestamp = prefs.getLastSyncTimestamp()
         )
     }
@@ -587,36 +1002,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setTab(tab: NavigationTab) {
-        val targetTab = if (tab == NavigationTab.ODOMETER && _uiState.value.selectedVehicle.type != VehicleType.PHEV) {
-            NavigationTab.CALCULATOR
-        } else {
-            tab
-        }
-        _uiState.update { it.copy(currentTab = targetTab) }
+        _uiState.update { it.copy(currentTab = tab) }
     }
 
     fun updateHomeEnergyPrice(price: Double) {
         val rounded = (price * 100.0).roundToInt() / 100.0
-        prefs.saveHomeEnergyPrice(rounded)
-        _uiState.update { it.copy(homeEnergyPrice = rounded) }
+        val clamped = rounded.coerceAtLeast(0.0)
+        prefs.saveHomeEnergyPrice(clamped)
+        _uiState.update { it.copy(homeEnergyPrice = clamped) }
     }
 
     fun stepHomeEnergyPrice(delta: Double) {
         val currentPrice = _uiState.value.homeEnergyPrice
-        val newPrice = ((currentPrice + delta).coerceAtLeast(0.05) * 100.0).roundToInt() / 100.0
+        val newPrice = ((currentPrice + delta).coerceAtLeast(0.0) * 100.0).roundToInt() / 100.0
         prefs.saveHomeEnergyPrice(newPrice)
         _uiState.update { it.copy(homeEnergyPrice = newPrice) }
     }
 
     fun updatePublicEnergyPrice(price: Double) {
         val rounded = (price * 100.0).roundToInt() / 100.0
-        prefs.savePublicEnergyPrice(rounded)
-        _uiState.update { it.copy(publicEnergyPrice = rounded) }
+        val clamped = rounded.coerceAtLeast(0.0)
+        prefs.savePublicEnergyPrice(clamped)
+        _uiState.update { it.copy(publicEnergyPrice = clamped) }
     }
 
     fun stepPublicEnergyPrice(delta: Double) {
         val currentPrice = _uiState.value.publicEnergyPrice
-        val newPrice = ((currentPrice + delta).coerceAtLeast(0.05) * 100.0).roundToInt() / 100.0
+        val newPrice = ((currentPrice + delta).coerceAtLeast(0.0) * 100.0).roundToInt() / 100.0
         prefs.savePublicEnergyPrice(newPrice)
         _uiState.update { it.copy(publicEnergyPrice = newPrice) }
     }
@@ -661,21 +1073,70 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectVehicle(vehicle: Vehicle) {
-        prefs.saveSelectedVehicleId(vehicle.id)
-        val nextTab = if (vehicle.type != VehicleType.PHEV && _uiState.value.currentTab == NavigationTab.ODOMETER) {
-            NavigationTab.CALCULATOR
-        } else {
-            _uiState.value.currentTab
+        val currentVehicle = _uiState.value.selectedVehicle
+        if (currentVehicle.id.isNotBlank()) {
+            val s = _uiState.value
+            prefs.saveVehicleOdometerDraft(
+                vehicleId = currentVehicle.id,
+                totalStartKm = s.odometerTotalStartKm,
+                totalEndKm = s.odometerTotalEndKm,
+                hevStartKm = s.odometerHevStartKm,
+                hevEndKm = s.odometerHevEndKm,
+                fuelLiters = s.odometerFuelLiters,
+                tripNote = s.odometerTripNote
+            )
         }
+
+        prefs.saveSelectedVehicleId(vehicle.id)
+
+        val vehicleDraft = prefs.getVehicleOdometerDraft(vehicle.id)
+        val (newStartTotal, newEndTotal, newStartHev, newEndHev, newFuel, newNote) = if (vehicleDraft != null && vehicleDraft.totalStartKm > 0.0) {
+            vehicleDraft
+        } else {
+            val vehicleEntries = _uiState.value.odometerEntries.filter { it.matchesVehicle(vehicle) }
+            val lastTrip = vehicleEntries.maxByOrNull { it.timestamp }
+            if (lastTrip != null && lastTrip.totalEndKm > 0.0) {
+                val startTot = lastTrip.totalEndKm
+                val startHev = if (vehicle.type == VehicleType.PHEV) {
+                    if (lastTrip.hevEndKm > 0) lastTrip.hevEndKm else lastTrip.hevStartKm
+                } else 0.0
+                VehicleOdometerDraft(
+                    totalStartKm = startTot,
+                    totalEndKm = vehicleDraft?.totalEndKm ?: 0.0,
+                    hevStartKm = startHev,
+                    hevEndKm = vehicleDraft?.hevEndKm ?: 0.0,
+                    fuelLiters = vehicleDraft?.fuelLiters ?: 0.0,
+                    tripNote = vehicleDraft?.tripNote ?: ""
+                )
+            } else if (vehicle.id == ExamplePhevTestData.VEHICLE_ID) {
+                VehicleOdometerDraft(
+                    totalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+                    totalEndKm = vehicleDraft?.totalEndKm ?: 0.0,
+                    hevStartKm = ExamplePhevTestData.LAST_HEV_END_KM,
+                    hevEndKm = vehicleDraft?.hevEndKm ?: 0.0,
+                    fuelLiters = vehicleDraft?.fuelLiters ?: 0.0,
+                    tripNote = vehicleDraft?.tripNote ?: ""
+                )
+            } else {
+                vehicleDraft ?: VehicleOdometerDraft()
+            }
+        }
+
         _uiState.update {
             it.copy(
                 selectedVehicle = vehicle,
-                currentTab = nextTab,
-                odometerCustomElectricConsumption = vehicle.electricConsumptionKwh100km,
-                odometerCustomGasolineConsumption = if (vehicle.gasolineConsumptionKmL > 0) vehicle.gasolineConsumptionKmL else 17.5,
+                odometerCustomElectricConsumption = 0.0,
+                odometerCustomGasolineConsumption = 0.0,
+                odometerTotalStartKm = newStartTotal,
+                odometerTotalEndKm = newEndTotal,
+                odometerHevStartKm = if (vehicle.type == VehicleType.PHEV) newStartHev else 0.0,
+                odometerHevEndKm = if (vehicle.type == VehicleType.PHEV) newEndHev else 0.0,
+                odometerFuelLiters = newFuel,
+                odometerTripNote = newNote,
                 isChangeVehicleDialogOpen = false
             )
         }
+        saveOdometerDraft()
     }
 
     fun addNewVehicle(vehicle: Vehicle) {
@@ -726,7 +1187,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 vehiclesList = defaultList,
-                selectedVehicle = defaultSelected
+                selectedVehicle = defaultSelected,
+                odometerCustomElectricConsumption = 0.0,
+                odometerCustomGasolineConsumption = 0.0
             )
         }
         showToast("Catálogo padrão de veículos restaurado.")
@@ -750,6 +1213,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 vehiclesList = updatedList,
                 selectedVehicle = updatedSelected,
                 vehicleBeingEdited = null,
+                odometerCustomElectricConsumption = 0.0,
+                odometerCustomGasolineConsumption = 0.0,
                 isEditParametersDialogOpen = false
             )
         }
@@ -802,6 +1267,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 vehiclesList = updatedList,
                 selectedVehicle = newSelected,
                 vehicleBeingEdited = null,
+                odometerCustomElectricConsumption = 0.0,
+                odometerCustomGasolineConsumption = 0.0,
                 isEditParametersDialogOpen = false,
                 isImageManagerDialogOpen = false
             )
@@ -956,8 +1423,143 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(odometerCustomGasolineConsumption = rounded) }
     }
 
+    fun setOdometerChargingLocation(location: ChargingLocation) {
+        _uiState.update { s ->
+            val count = s.odometerRechargeCount.coerceAtLeast(1)
+            val updatedLocs = if (count == 1) listOf(location) else s.odometerEffectiveRechargeLocations
+            val updatedPrices = if (count == 1) {
+                listOf(
+                    when (location) {
+                        ChargingLocation.HOME -> s.homeEnergyPrice
+                        ChargingLocation.STATION -> s.publicEnergyPrice
+                        ChargingLocation.NONE -> 0.0
+                    }
+                )
+            } else s.odometerEffectiveRechargePrices
+            s.copy(
+                odometerChargingLocation = location,
+                odometerUseHomeTariff = (location == ChargingLocation.HOME),
+                odometerRechargeLocations = updatedLocs,
+                odometerRechargePrices = updatedPrices
+            )
+        }
+        prefs.saveOdometerChargingLocation(location)
+        prefs.saveOdometerRechargeLocations(_uiState.value.odometerRechargeLocations)
+        prefs.saveOdometerRechargePrices(_uiState.value.odometerRechargePrices)
+        saveOdometerDraft()
+    }
+
     fun setOdometerUseHomeTariff(useHome: Boolean) {
-        _uiState.update { it.copy(odometerUseHomeTariff = useHome) }
+        val location = if (useHome) ChargingLocation.HOME else ChargingLocation.STATION
+        setOdometerChargingLocation(location)
+    }
+
+    fun updateOdometerRechargeLocation(index: Int, location: ChargingLocation) {
+        _uiState.update { s ->
+            val count = s.odometerRechargeCount.coerceAtLeast(1)
+            val currentLocs = s.odometerEffectiveRechargeLocations.toMutableList()
+            while (currentLocs.size < count) {
+                currentLocs.add(s.odometerChargingLocation)
+            }
+            if (index in 0 until count) {
+                currentLocs[index] = location
+            }
+
+            val currentPrices = s.odometerEffectiveRechargePrices.toMutableList()
+            while (currentPrices.size < count) {
+                currentPrices.add(s.publicEnergyPrice)
+            }
+            if (index in 0 until count) {
+                currentPrices[index] = when (location) {
+                    ChargingLocation.HOME -> s.homeEnergyPrice
+                    ChargingLocation.STATION -> s.publicEnergyPrice
+                    ChargingLocation.NONE -> 0.0
+                }
+            }
+
+            val newPrimary = if (index == 0) location else s.odometerChargingLocation
+            s.copy(
+                odometerChargingLocation = newPrimary,
+                odometerUseHomeTariff = (newPrimary == ChargingLocation.HOME),
+                odometerRechargeLocations = currentLocs,
+                odometerRechargePrices = currentPrices
+            )
+        }
+        prefs.saveOdometerChargingLocation(_uiState.value.odometerChargingLocation)
+        prefs.saveOdometerRechargeLocations(_uiState.value.odometerRechargeLocations)
+        prefs.saveOdometerRechargePrices(_uiState.value.odometerRechargePrices)
+        saveOdometerDraft()
+    }
+
+    fun setAllOdometerRechargeLocations(location: ChargingLocation) {
+        _uiState.update { s ->
+            val count = s.odometerRechargeCount.coerceAtLeast(1)
+            val allList = List(count) { location }
+            val defaultPrice = when (location) {
+                ChargingLocation.HOME -> s.homeEnergyPrice
+                ChargingLocation.STATION -> s.publicEnergyPrice
+                ChargingLocation.NONE -> 0.0
+            }
+            val allPrices = List(count) { defaultPrice }
+            s.copy(
+                odometerChargingLocation = location,
+                odometerUseHomeTariff = (location == ChargingLocation.HOME),
+                odometerRechargeLocations = allList,
+                odometerRechargePrices = allPrices
+            )
+        }
+        prefs.saveOdometerChargingLocation(location)
+        prefs.saveOdometerRechargeLocations(_uiState.value.odometerRechargeLocations)
+        prefs.saveOdometerRechargePrices(_uiState.value.odometerRechargePrices)
+        saveOdometerDraft()
+    }
+
+    fun updateOdometerRechargePrice(index: Int, price: Double) {
+        val rounded = ((price * 100.0).roundToInt() / 100.0).coerceAtLeast(0.0)
+        _uiState.update { s ->
+            val count = s.odometerRechargeCount.coerceAtLeast(1)
+            val current = s.odometerEffectiveRechargePrices.toMutableList()
+            while (current.size < count) {
+                current.add(s.publicEnergyPrice)
+            }
+            if (index in current.indices) {
+                current[index] = rounded
+            }
+            s.copy(odometerRechargePrices = current)
+        }
+        prefs.saveOdometerRechargePrices(_uiState.value.odometerRechargePrices)
+        saveOdometerDraft()
+    }
+
+    fun stepOdometerRechargePrice(index: Int, delta: Double) {
+        val currentList = _uiState.value.odometerEffectiveRechargePrices
+        val defaultLocPrice = if (_uiState.value.odometerEffectiveRechargeLocations.getOrElse(index) { ChargingLocation.HOME } == ChargingLocation.HOME) {
+            _uiState.value.homeEnergyPrice
+        } else {
+            _uiState.value.publicEnergyPrice
+        }
+        val currentVal = currentList.getOrElse(index) { defaultLocPrice }
+        updateOdometerRechargePrice(index, currentVal + delta)
+    }
+
+    fun resetOdometerRechargePrice(index: Int) {
+        _uiState.update { s ->
+            val count = s.odometerRechargeCount.coerceAtLeast(1)
+            val current = s.odometerEffectiveRechargePrices.toMutableList()
+            while (current.size < count) {
+                current.add(s.publicEnergyPrice)
+            }
+            if (index in current.indices) {
+                val loc = s.odometerEffectiveRechargeLocations.getOrElse(index) { ChargingLocation.HOME }
+                current[index] = when (loc) {
+                    ChargingLocation.HOME -> s.homeEnergyPrice
+                    ChargingLocation.STATION -> s.publicEnergyPrice
+                    ChargingLocation.NONE -> 0.0
+                }
+            }
+            s.copy(odometerRechargePrices = current)
+        }
+        prefs.saveOdometerRechargePrices(_uiState.value.odometerRechargePrices)
         saveOdometerDraft()
     }
 
@@ -967,9 +1569,206 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         saveOdometerDraft()
     }
 
+    fun updateOdometerRechargeCount(count: Int) {
+        val safe = count.coerceAtLeast(1)
+        _uiState.update { s ->
+            val currentLocs = s.odometerEffectiveRechargeLocations
+            val newLocs = when {
+                currentLocs.size == safe -> currentLocs
+                currentLocs.size < safe -> {
+                    val last = currentLocs.lastOrNull() ?: s.odometerChargingLocation
+                    currentLocs + List(safe - currentLocs.size) { last }
+                }
+                else -> currentLocs.take(safe)
+            }
+            val currentPercents = s.odometerEffectiveRechargeBatteryPercents
+            val newPercents = when {
+                currentPercents.size == safe -> currentPercents
+                currentPercents.size < safe -> {
+                    currentPercents + List(safe - currentPercents.size) { 100.0 }
+                }
+                else -> currentPercents.take(safe)
+            }
+            val currentInitPercents = s.odometerEffectiveRechargeInitialBatteryPercents
+            val newInitPercents = when {
+                currentInitPercents.size == safe -> currentInitPercents
+                currentInitPercents.size < safe -> {
+                    val last = currentInitPercents.lastOrNull() ?: 25.0
+                    currentInitPercents + List(safe - currentInitPercents.size) { last }
+                }
+                else -> currentInitPercents.take(safe)
+            }
+            val currentPrices = s.odometerEffectiveRechargePrices
+            val newPrices = when {
+                currentPrices.size == safe -> currentPrices
+                currentPrices.size < safe -> {
+                    val last = currentPrices.lastOrNull() ?: s.publicEnergyPrice
+                    currentPrices + List(safe - currentPrices.size) { last }
+                }
+                else -> currentPrices.take(safe)
+            }
+            s.copy(
+                odometerRechargeCount = safe,
+                odometerRechargeLocations = newLocs,
+                odometerRechargeBatteryPercents = newPercents,
+                odometerRechargeInitialBatteryPercents = newInitPercents,
+                odometerRechargePrices = newPrices
+            )
+        }
+        prefs.saveOdometerRechargeCount(safe)
+        prefs.saveOdometerRechargeLocations(_uiState.value.odometerRechargeLocations)
+        prefs.saveOdometerRechargeBatteryPercents(_uiState.value.odometerRechargeBatteryPercents)
+        prefs.saveOdometerRechargeInitialBatteryPercents(_uiState.value.odometerRechargeInitialBatteryPercents)
+        prefs.saveOdometerRechargePrices(_uiState.value.odometerRechargePrices)
+    }
+
+    fun stepOdometerRechargeCount(delta: Int) {
+        val current = _uiState.value.odometerRechargeCount
+        updateOdometerRechargeCount(current + delta)
+    }
+
+    fun addOdometerRecharge() {
+        stepOdometerRechargeCount(1)
+    }
+
+    fun removeOdometerRecharge(index: Int = -1) {
+        val currentCount = _uiState.value.odometerRechargeCount
+        if (currentCount <= 1) return
+        val targetIndex = if (index in 0 until currentCount) index else currentCount - 1
+        _uiState.update { s ->
+            val locs = s.odometerEffectiveRechargeLocations.toMutableList()
+            val percents = s.odometerEffectiveRechargeBatteryPercents.toMutableList()
+            val initPercents = s.odometerEffectiveRechargeInitialBatteryPercents.toMutableList()
+            val prices = s.odometerEffectiveRechargePrices.toMutableList()
+            if (targetIndex in locs.indices) locs.removeAt(targetIndex)
+            if (targetIndex in percents.indices) percents.removeAt(targetIndex)
+            if (targetIndex in initPercents.indices) initPercents.removeAt(targetIndex)
+            if (targetIndex in prices.indices) prices.removeAt(targetIndex)
+            val newCount = (currentCount - 1).coerceAtLeast(1)
+            s.copy(
+                odometerRechargeCount = newCount,
+                odometerRechargeLocations = locs,
+                odometerRechargeBatteryPercents = percents,
+                odometerRechargeInitialBatteryPercents = initPercents,
+                odometerRechargePrices = prices
+            )
+        }
+        prefs.saveOdometerRechargeCount(_uiState.value.odometerRechargeCount)
+        prefs.saveOdometerRechargeLocations(_uiState.value.odometerRechargeLocations)
+        prefs.saveOdometerRechargeBatteryPercents(_uiState.value.odometerRechargeBatteryPercents)
+        prefs.saveOdometerRechargeInitialBatteryPercents(_uiState.value.odometerRechargeInitialBatteryPercents)
+        prefs.saveOdometerRechargePrices(_uiState.value.odometerRechargePrices)
+        saveOdometerDraft()
+    }
+
+    fun updateOdometerRechargeInitialBatteryPercent(index: Int, percent: Double) {
+        val rounded = ((percent * 10.0).roundToInt() / 10.0).coerceIn(0.0, 100.0)
+        _uiState.update { s ->
+            val count = s.odometerRechargeCount.coerceAtLeast(1)
+            val current = s.odometerEffectiveRechargeInitialBatteryPercents.toMutableList()
+            while (current.size < count) {
+                current.add(25.0)
+            }
+            if (index in current.indices) {
+                current[index] = rounded
+            }
+            s.copy(
+                odometerRechargeInitialBatteryPercents = current
+            )
+        }
+        prefs.saveOdometerRechargeInitialBatteryPercents(_uiState.value.odometerRechargeInitialBatteryPercents)
+        saveOdometerDraft()
+    }
+
+    fun stepOdometerRechargeInitialBatteryPercent(index: Int, delta: Double) {
+        val currentList = _uiState.value.odometerEffectiveRechargeInitialBatteryPercents
+        val currentVal = currentList.getOrElse(index) { 25.0 }
+        updateOdometerRechargeInitialBatteryPercent(index, currentVal + delta)
+    }
+
+    fun updateOdometerRechargeBatteryPercent(index: Int, percent: Double) {
+        val rounded = ((percent * 10.0).roundToInt() / 10.0).coerceIn(0.0, 100.0)
+        _uiState.update { s ->
+            val count = s.odometerRechargeCount.coerceAtLeast(1)
+            val current = s.odometerEffectiveRechargeBatteryPercents.toMutableList()
+            while (current.size < count) {
+                current.add(100.0)
+            }
+            if (index in current.indices) {
+                current[index] = rounded
+            }
+            val newPrimary = if (index == 0) rounded else s.odometerBatteryStartPercent
+            val newMax = (newPrimary - 25.0).coerceAtLeast(0.0)
+            s.copy(
+                odometerBatteryStartPercent = newPrimary,
+                odometerBatteryMaxPercent = newMax,
+                odometerRechargeBatteryPercents = current
+            )
+        }
+        prefs.saveOdometerBatteryStartPercent(_uiState.value.odometerBatteryStartPercent)
+        prefs.saveOdometerBatteryMaxPercent(_uiState.value.odometerBatteryMaxPercent)
+        prefs.saveOdometerRechargeBatteryPercents(_uiState.value.odometerRechargeBatteryPercents)
+        saveOdometerDraft()
+    }
+
+    fun stepOdometerRechargeBatteryPercent(index: Int, delta: Double) {
+        val currentList = _uiState.value.odometerEffectiveRechargeBatteryPercents
+        val currentVal = currentList.getOrElse(index) { 100.0 }
+        updateOdometerRechargeBatteryPercent(index, currentVal + delta)
+    }
+
+    fun updateOdometerRechargeFinalBatteryPercent(index: Int, percent: Double) {
+        updateOdometerRechargeBatteryPercent(index, percent)
+    }
+
+    fun stepOdometerRechargeFinalBatteryPercent(index: Int, delta: Double) {
+        stepOdometerRechargeBatteryPercent(index, delta)
+    }
+
     fun updateOdometerTripNote(note: String) {
         _uiState.update { it.copy(odometerTripNote = note) }
         saveOdometerDraft()
+    }
+
+    fun updateOdometerBatteryStartPercent(percent: Double) {
+        val rounded = ((percent * 10.0).roundToInt() / 10.0).coerceIn(0.0, 100.0)
+        val usableMax = (rounded - 25.0).coerceAtLeast(0.0)
+        _uiState.update { s ->
+            val count = s.odometerRechargeCount.coerceAtLeast(1)
+            val current = s.odometerEffectiveRechargeBatteryPercents.toMutableList()
+            while (current.size < count) {
+                current.add(100.0)
+            }
+            if (current.isNotEmpty()) {
+                current[0] = rounded
+            }
+            s.copy(
+                odometerBatteryStartPercent = rounded,
+                odometerBatteryMaxPercent = usableMax,
+                odometerRechargeBatteryPercents = current
+            )
+        }
+        prefs.saveOdometerBatteryStartPercent(rounded)
+        prefs.saveOdometerBatteryMaxPercent(usableMax)
+        prefs.saveOdometerRechargeBatteryPercents(_uiState.value.odometerRechargeBatteryPercents)
+    }
+
+    fun stepOdometerBatteryStartPercent(delta: Double) {
+        val current = _uiState.value.odometerBatteryStartPercent
+        updateOdometerBatteryStartPercent(current + delta)
+    }
+
+    fun resetOdometerBatteryStartPercent() {
+        updateOdometerBatteryStartPercent(100.0)
+    }
+
+    fun updateOdometerBatteryMaxPercent(percent: Double) {
+        val startVal = (percent + 25.0).coerceIn(0.0, 100.0)
+        updateOdometerBatteryStartPercent(startVal)
+    }
+
+    fun resetOdometerBatteryMaxPercent() {
+        updateOdometerBatteryStartPercent(100.0)
     }
 
     fun openOdometerHistoryDialog(open: Boolean) {
@@ -977,7 +1776,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openInitialOdometerDialog(open: Boolean) {
-        if (open && _uiState.value.odometerEntries.isNotEmpty()) {
+        if (open && _uiState.value.currentVehicleOdometerEntries.isNotEmpty()) {
             val msg = if (_uiState.value.language == AppLanguage.EN_US) {
                 "Cannot edit initial mileage while trip history exists."
             } else {
@@ -990,7 +1789,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveInitialOdometer(totalKm: Double, hevKm: Double) {
-        if (_uiState.value.odometerEntries.isNotEmpty()) {
+        if (_uiState.value.currentVehicleOdometerEntries.isNotEmpty()) {
             val msg = if (_uiState.value.language == AppLanguage.EN_US) {
                 "Cannot edit initial mileage while trip history exists."
             } else {
@@ -1001,6 +1800,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         val cleanTotal = ((totalKm * 10.0).roundToInt() / 10.0).coerceAtLeast(0.0)
         val cleanHev = ((hevKm * 10.0).roundToInt() / 10.0).coerceAtLeast(0.0)
+        val vehicleId = _uiState.value.selectedVehicle.id
         _uiState.update {
             it.copy(
                 odometerTotalStartKm = cleanTotal,
@@ -1011,6 +1811,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 isInitialOdometerDialogOpen = false
             )
         }
+        prefs.saveVehicleOdometerDraft(vehicleId, cleanTotal, 0.0, cleanHev, 0.0, 0.0, "")
         saveOdometerDraft()
         val msg = if (_uiState.value.language == AppLanguage.EN_US) {
             "Initial baseline mileage saved!"
@@ -1021,7 +1822,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun removeInitialOdometer() {
-        if (_uiState.value.odometerEntries.isNotEmpty()) {
+        if (_uiState.value.currentVehicleOdometerEntries.isNotEmpty()) {
             val msg = if (_uiState.value.language == AppLanguage.EN_US) {
                 "Cannot remove initial mileage while trip history exists."
             } else {
@@ -1030,12 +1831,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             showToast(msg)
             return
         }
+        val vehicleId = _uiState.value.selectedVehicle.id
         _uiState.update {
             it.copy(
                 odometerTotalStartKm = 0.0,
                 odometerHevStartKm = 0.0
             )
         }
+        prefs.saveVehicleOdometerDraft(vehicleId, 0.0, 0.0, 0.0, 0.0, 0.0, "")
         saveOdometerDraft()
         val msg = if (_uiState.value.language == AppLanguage.EN_US) {
             "Initial baseline mileage removed."
@@ -1096,11 +1899,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 odometerHevStartKm = 0.0,
                 odometerHevEndKm = 0.0,
                 odometerFuelLiters = 0.0,
-                odometerTripNote = ""
+                odometerTripNote = "",
+                odometerChargingLocation = ChargingLocation.HOME,
+                odometerUseHomeTariff = true,
+                odometerBatteryStartPercent = 100.0,
+                odometerBatteryMaxPercent = 75.0,
+                odometerRechargeCount = 1
             )
         }
+        prefs.saveOdometerChargingLocation(ChargingLocation.HOME)
+        prefs.saveOdometerRechargeCount(1)
         saveOdometerDraft()
         showToast(if (_uiState.value.language == AppLanguage.EN_US) "Inputs reset!" else "Odômetro zerado!")
+    }
+
+    fun limitTripToMaxRechargeRange() {
+        val s = _uiState.value
+        val maxKm = s.odometerMaxRechargeEvKm
+        if (maxKm > 0) {
+            val cleanMax = ((maxKm * 10.0).roundToInt() / 10.0)
+            val newEnd = s.odometerTotalStartKm + cleanMax
+            updateOdometerTotalEndKm(newEnd)
+            val msg = if (s.language == AppLanguage.EN_US) {
+                "Mileage limited to max recharge range: ${formatNumber(cleanMax, 1, s.language)} km"
+            } else {
+                "Quilometragem limitada à autonomia máxima da carga: ${formatNumber(cleanMax, 1, s.language)} km"
+            }
+            showToast(msg)
+        }
+    }
+
+    fun autoAdjustRechargeCountForTrip() {
+        val s = _uiState.value
+        val neededDist = s.odometerEffectiveTotalKm
+        if (neededDist <= 0 || s.odometerEffectiveElectricConsumption <= 0) return
+
+        val pFinal = s.odometerEffectiveRechargeBatteryPercents.firstOrNull() ?: 100.0
+        val reservePercent = if (s.selectedVehicle.type == VehicleType.PHEV) s.odometerEvReservePercent else 0.0
+        val usableP = (pFinal - reservePercent).coerceIn(5.0, 100.0)
+        val kwhPerRecharge = s.selectedVehicle.batteryCapacityKwh * (usableP / 100.0)
+        val rangePerRecharge = if (kwhPerRecharge > 0) (kwhPerRecharge / s.odometerEffectiveElectricConsumption) * 100.0 else 200.0
+
+        val requiredCount = kotlin.math.ceil(neededDist / rangePerRecharge).toInt().coerceAtLeast(1)
+        updateOdometerRechargeCount(requiredCount)
+
+        val msg = if (s.language == AppLanguage.EN_US) {
+            "Adjusted to $requiredCount recharges to cover ${formatNumber(neededDist, 1, s.language)} km"
+        } else {
+            "Ajustado para $requiredCount recargas para cobrir os ${formatNumber(neededDist, 1, s.language)} km"
+        }
+        showToast(msg)
     }
 
     fun openSaveOdometerTripDialog(open: Boolean) {
@@ -1109,6 +1957,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveCurrentOdometerTrip(customTitle: String = "") {
         val s = _uiState.value
+        if (s.selectedVehicle.type == VehicleType.BEV && s.odometerExcessEvKm > 0.0) {
+            val msg = if (s.language == AppLanguage.EN_US) {
+                "Cannot save: ${formatNumber(s.odometerDeltaTotalKm, 1, s.language)} km exceeds max recharge range (${formatNumber(s.odometerMaxRechargeEvKm, 1, s.language)} km). Please adjust recharges or limit mileage."
+            } else {
+                "Não é possível salvar: ${formatNumber(s.odometerDeltaTotalKm, 1, s.language)} km excede a autonomia máxima (${formatNumber(s.odometerMaxRechargeEvKm, 1, s.language)} km) para ${s.odometerRechargeCount} recarga(s). Ajuste as recargas ou limite a quilometragem."
+            }
+            showToast(msg)
+            return
+        }
+
         val defaultTitle = if (s.language == AppLanguage.EN_US) {
             "Trip ${s.selectedVehicle.name}"
         } else {
@@ -1122,7 +1980,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         val entry = OdometerEntry(
             title = finalTitle,
+            vehicleId = s.selectedVehicle.id,
             vehicleName = s.selectedVehicle.name,
+            vehicleType = s.selectedVehicle.type,
             totalKm = s.odometerDeltaTotalKm,
             evKm = s.odometerDeltaEvKm,
             hevKm = s.odometerDeltaHevKm,
@@ -1137,16 +1997,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             gasolineConsumptionKmL = if (s.odometerAverageHevKmL > 0) s.odometerAverageHevKmL else s.odometerEffectiveGasolineConsumption,
             energyPriceKwh = s.odometerEffectiveEnergyPrice,
             gasPriceLiter = s.gasolinePrice,
-            chargingLocation = if (s.odometerUseHomeTariff) ChargingLocation.HOME else ChargingLocation.STATION,
-            batteryCapacityKwh = s.selectedVehicle.batteryCapacityKwh
+            chargingLocation = s.odometerChargingLocation,
+            batteryCapacityKwh = s.selectedVehicle.batteryCapacityKwh,
+            batteryMaxPercent = s.odometerUsableBatteryPercent,
+            batteryStartPercent = s.odometerBatteryStartPercent,
+            rechargeCount = s.odometerRechargeCount,
+            rechargeLocations = s.odometerEffectiveRechargeLocations,
+            rechargeBatteryPercents = s.odometerEffectiveRechargeBatteryPercents,
+            rechargeInitialBatteryPercents = s.odometerEffectiveRechargeInitialBatteryPercents,
+            rechargePrices = s.odometerEffectiveRechargePrices,
+            homeEnergyPrice = s.homeEnergyPrice,
+            publicEnergyPrice = s.publicEnergyPrice
         )
 
         val updatedEntries = listOf(entry) + s.odometerEntries
         prefs.saveOdometerEntries(updatedEntries)
+        viewModelScope.launch {
+            tripRepository.insertTrip(entry)
+        }
 
         // Deixa salvo no campo anterior o valor final do último histórico registrado
         val nextStartTotal = if (s.odometerTotalEndKm > 0) s.odometerTotalEndKm else s.odometerTotalStartKm
-        val nextStartHev = if (s.odometerHevEndKm > 0) s.odometerHevEndKm else s.odometerHevStartKm
+        val nextStartHev = if (s.selectedVehicle.type == VehicleType.PHEV) {
+            if (s.odometerHevEndKm > 0) s.odometerHevEndKm else s.odometerHevStartKm
+        } else 0.0
+
+        prefs.saveVehicleOdometerDraft(
+            vehicleId = s.selectedVehicle.id,
+            totalStartKm = nextStartTotal,
+            totalEndKm = 0.0,
+            hevStartKm = nextStartHev,
+            hevEndKm = 0.0,
+            fuelLiters = 0.0,
+            tripNote = ""
+        )
 
         _uiState.update {
             it.copy(
@@ -1157,9 +2041,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 odometerHevStartKm = nextStartHev,
                 odometerHevEndKm = 0.0,
                 odometerFuelLiters = 0.0,
-                odometerTripNote = ""
+                odometerTripNote = "",
+                odometerChargingLocation = ChargingLocation.HOME,
+                odometerUseHomeTariff = true,
+                odometerBatteryStartPercent = 100.0,
+                odometerBatteryMaxPercent = 75.0,
+                odometerRechargeCount = 1,
+                odometerRechargeLocations = listOf(ChargingLocation.HOME),
+                odometerRechargeBatteryPercents = listOf(100.0)
             )
         }
+        prefs.saveOdometerChargingLocation(ChargingLocation.HOME)
+        prefs.saveOdometerRechargeCount(1)
+        prefs.saveOdometerRechargeLocations(listOf(ChargingLocation.HOME))
+        prefs.saveOdometerRechargeBatteryPercents(listOf(100.0))
         saveOdometerDraft()
         showToast(s.strings.odometerTripSavedSuccess)
     }
@@ -1167,6 +2062,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun applyOdometerEntryAsPrevious(entry: OdometerEntry) {
         val nextStartTotal = if (entry.totalEndKm > 0) entry.totalEndKm else entry.totalStartKm
         val nextStartHev = if (entry.hevEndKm > 0) entry.hevEndKm else entry.hevStartKm
+
+        val currentVehicleId = _uiState.value.selectedVehicle.id
+        prefs.saveVehicleOdometerDraft(
+            vehicleId = currentVehicleId,
+            totalStartKm = nextStartTotal,
+            totalEndKm = 0.0,
+            hevStartKm = nextStartHev,
+            hevEndKm = 0.0,
+            fuelLiters = 0.0,
+            tripNote = ""
+        )
 
         _uiState.update {
             it.copy(
@@ -1185,6 +2091,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val updated = _uiState.value.odometerEntries.filter { it.id != id }
         prefs.saveOdometerEntries(updated)
         _uiState.update { it.copy(odometerEntries = updated) }
+        viewModelScope.launch {
+            tripRepository.deleteTripById(id)
+        }
     }
 
     fun updateOdometerEntry(
@@ -1195,26 +2104,109 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         hevStartKm: Double,
         hevEndKm: Double,
         fuelLiters: Double,
-        chargingLocation: ChargingLocation
+        chargingLocation: ChargingLocation,
+        batteryStartPercent: Double = 100.0,
+        batteryMaxPercent: Double = 75.0,
+        rechargeCount: Int = 1,
+        rechargeLocations: List<ChargingLocation> = emptyList(),
+        rechargeBatteryPercents: List<Double> = emptyList(),
+        rechargeInitialBatteryPercents: List<Double> = emptyList(),
+        rechargePrices: List<Double> = emptyList()
     ) {
         val deltaTotal = (totalEndKm - totalStartKm).coerceAtLeast(0.0)
         val deltaHev = (hevEndKm - hevStartKm).coerceAtLeast(0.0)
         val deltaEv = (deltaTotal - deltaHev).coerceAtLeast(0.0)
-        val avgHevKmL = if (fuelLiters > 0 && deltaHev > 0) deltaHev / fuelLiters else 0.0
-        val avgGlobalKmL = if (fuelLiters > 0 && deltaTotal > 0) deltaTotal / fuelLiters else 0.0
 
         val homeTariff = _uiState.value.homeEnergyPrice
         val publicTariff = _uiState.value.publicEnergyPrice
 
+        val actualStartPercent = if (batteryStartPercent > 0.0) batteryStartPercent else (batteryMaxPercent + 25.0).coerceIn(0.0, 100.0)
+        val actualMaxPercent = (actualStartPercent - 25.0).coerceAtLeast(0.0)
+        val safeRechargeCount = rechargeCount.coerceAtLeast(1)
+
+        val safeLocations = if (rechargeLocations.isNotEmpty()) {
+            if (rechargeLocations.size < safeRechargeCount) {
+                val last = rechargeLocations.lastOrNull() ?: chargingLocation
+                rechargeLocations + List(safeRechargeCount - rechargeLocations.size) { last }
+            } else {
+                rechargeLocations.take(safeRechargeCount)
+            }
+        } else {
+            List(safeRechargeCount) { chargingLocation }
+        }
+
+        val safePercents = if (rechargeBatteryPercents.isNotEmpty()) {
+            if (rechargeBatteryPercents.size < safeRechargeCount) {
+                val last = rechargeBatteryPercents.lastOrNull() ?: 100.0
+                rechargeBatteryPercents + List(safeRechargeCount - rechargeBatteryPercents.size) { last }
+            } else {
+                rechargeBatteryPercents.take(safeRechargeCount)
+            }
+        } else {
+            List(safeRechargeCount) { 100.0 }
+        }
+
+        val safeInitPercents = if (rechargeInitialBatteryPercents.isNotEmpty()) {
+            if (rechargeInitialBatteryPercents.size < safeRechargeCount) {
+                val last = rechargeInitialBatteryPercents.lastOrNull() ?: 25.0
+                rechargeInitialBatteryPercents + List(safeRechargeCount - rechargeInitialBatteryPercents.size) { last }
+            } else {
+                rechargeInitialBatteryPercents.take(safeRechargeCount)
+            }
+        } else {
+            List(safeRechargeCount) { 25.0 }
+        }
+
+        val safePrices = if (rechargePrices.isNotEmpty()) {
+            if (rechargePrices.size < safeRechargeCount) {
+                val last = rechargePrices.lastOrNull() ?: publicTariff
+                rechargePrices + List(safeRechargeCount - rechargePrices.size) { last }
+            } else {
+                rechargePrices.take(safeRechargeCount)
+            }
+        } else {
+            safeLocations.map { loc ->
+                when (loc) {
+                    ChargingLocation.HOME -> homeTariff
+                    ChargingLocation.STATION -> publicTariff
+                    ChargingLocation.NONE -> 0.0
+                }
+            }
+        }
+
         val updatedList = _uiState.value.odometerEntries.map { entry ->
             if (entry.id == id) {
-                val newEnergyPrice = if (chargingLocation == ChargingLocation.HOME) {
-                    if (entry.chargingLocation == ChargingLocation.HOME && entry.energyPriceKwh > 0) entry.energyPriceKwh else homeTariff
-                } else {
-                    if (entry.chargingLocation == ChargingLocation.STATION && entry.energyPriceKwh > 0) entry.energyPriceKwh else publicTariff
+                val newEnergyPrice = if (safePrices.isNotEmpty()) safePrices.average() else when (chargingLocation) {
+                    ChargingLocation.HOME -> if (entry.chargingLocation == ChargingLocation.HOME && entry.energyPriceKwh > 0) entry.energyPriceKwh else homeTariff
+                    ChargingLocation.STATION -> if (entry.chargingLocation == ChargingLocation.STATION && entry.energyPriceKwh > 0) entry.energyPriceKwh else publicTariff
+                    ChargingLocation.NONE -> 0.0
                 }
 
-                entry.copy(
+                val batCap = if (entry.batteryCapacityKwh > 0) entry.batteryCapacityKwh else _uiState.value.selectedVehicle.batteryCapacityKwh
+                val elecCons = if (entry.electricConsumptionKwh100km > 0) entry.electricConsumptionKwh100km else _uiState.value.odometerEffectiveElectricConsumption
+                val reservePercent = if (entry.vehicleType == VehicleType.PHEV) 25.0 else 0.0
+                var totalUsableKwh = 0.0
+                for (i in safeLocations.indices) {
+                    if (safeLocations[i] != ChargingLocation.NONE) {
+                        val pFinal = safePercents.getOrElse(i) { 100.0 }
+                        val pInit = safeInitPercents.getOrElse(i) { 25.0 }
+                        val usableP = (pFinal - pInit.coerceAtLeast(reservePercent)).coerceIn(0.0, 100.0)
+                        totalUsableKwh += (batCap * (usableP / 100.0))
+                    }
+                }
+                val maxRechargeEvKm = if (elecCons > 0 && totalUsableKwh > 0.0) (totalUsableKwh / elecCons) * 100.0 else 0.0
+                val rechargeEvKm = deltaEv.coerceAtMost(maxRechargeEvKm)
+                val excessEvKm = (deltaEv - rechargeEvKm).coerceAtLeast(0.0)
+                val effectiveFuelKm = when {
+                    deltaHev > 0.0 -> deltaHev + excessEvKm
+                    fuelLiters > 0.0 && deltaTotal > 0.0 -> (deltaTotal - rechargeEvKm).coerceAtLeast(0.0)
+                    else -> 0.0
+                }
+
+                val avgHevKmL = if (fuelLiters > 0 && effectiveFuelKm > 0) effectiveFuelKm / fuelLiters else 0.0
+                val avgGlobalKmL = if (fuelLiters > 0 && deltaTotal > 0) deltaTotal / fuelLiters else 0.0
+
+                val updated = entry.copy(
                     title = title,
                     totalStartKm = totalStartKm,
                     totalEndKm = totalEndKm,
@@ -1228,9 +2220,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     averageGlobalKmL = avgGlobalKmL,
                     gasolineConsumptionKmL = if (avgHevKmL > 0) avgHevKmL else entry.gasolineConsumptionKmL,
                     chargingLocation = chargingLocation,
+                    rechargeLocations = safeLocations,
+                    rechargeBatteryPercents = safePercents,
+                    rechargeInitialBatteryPercents = safeInitPercents,
+                    rechargePrices = safePrices,
+                    homeEnergyPrice = homeTariff,
+                    publicEnergyPrice = publicTariff,
                     energyPriceKwh = newEnergyPrice,
-                    batteryCapacityKwh = if (entry.batteryCapacityKwh > 0) entry.batteryCapacityKwh else _uiState.value.selectedVehicle.batteryCapacityKwh
+                    batteryCapacityKwh = if (entry.batteryCapacityKwh > 0) entry.batteryCapacityKwh else _uiState.value.selectedVehicle.batteryCapacityKwh,
+                    batteryMaxPercent = actualMaxPercent,
+                    batteryStartPercent = actualStartPercent,
+                    rechargeCount = safeRechargeCount
                 )
+                viewModelScope.launch {
+                    tripRepository.updateTrip(updated)
+                }
+                updated
             } else {
                 entry
             }
@@ -1240,14 +2245,390 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         showToast("Medição atualizada com sucesso!")
     }
 
+    fun setOdometerFilterVehicleOnly(vehicleOnly: Boolean) {
+        _uiState.update { it.copy(odometerFilterVehicleOnly = vehicleOnly) }
+    }
+
+    fun clearCurrentVehicleOdometerEntries() {
+        val currentVehicle = _uiState.value.selectedVehicle
+        val updated = _uiState.value.odometerEntries.filterNot { it.matchesVehicle(currentVehicle) }
+        prefs.saveOdometerEntries(updated)
+        prefs.saveVehicleOdometerDraft(currentVehicle.id, 0.0, 0.0, 0.0, 0.0, 0.0, "")
+        _uiState.update {
+            it.copy(
+                odometerEntries = updated,
+                odometerTotalStartKm = 0.0,
+                odometerTotalEndKm = 0.0,
+                odometerHevStartKm = 0.0,
+                odometerHevEndKm = 0.0,
+                odometerFuelLiters = 0.0,
+                odometerTripNote = ""
+            )
+        }
+        viewModelScope.launch {
+            tripRepository.deleteTripsByVehicle(currentVehicle.id, currentVehicle.name)
+        }
+        val msg = if (_uiState.value.language == AppLanguage.EN_US) {
+            "History for ${currentVehicle.name} cleared successfully!"
+        } else {
+            "Histórico de ${currentVehicle.name} limpo com sucesso!"
+        }
+        showToast(msg)
+    }
+
     fun clearAllOdometerEntries() {
         prefs.saveOdometerEntries(emptyList())
-        _uiState.update { it.copy(odometerEntries = emptyList()) }
+        _uiState.update {
+            it.copy(
+                odometerEntries = emptyList(),
+                odometerTotalStartKm = 0.0,
+                odometerTotalEndKm = 0.0,
+                odometerHevStartKm = 0.0,
+                odometerHevEndKm = 0.0,
+                odometerFuelLiters = 0.0,
+                odometerTripNote = ""
+            )
+        }
+        viewModelScope.launch {
+            tripRepository.deleteAllTrips()
+        }
         showToast(_uiState.value.strings.odometerHistoryCleared)
     }
 
     fun clearOdometerHistory() {
-        clearAllOdometerEntries()
+        if (_uiState.value.odometerFilterVehicleOnly) {
+            clearCurrentVehicleOdometerEntries()
+        } else {
+            clearAllOdometerEntries()
+        }
+    }
+
+    /**
+     * Importa viagens de uma planilha CSV ou XLSX (substituindo ou mesclando com o histórico atual).
+     */
+    fun importOdometerEntries(importedEntries: List<OdometerEntry>, replaceAll: Boolean) {
+        if (importedEntries.isEmpty()) return
+
+        // 1. Identifica o veículo principal das viagens importadas
+        val currentVehicle = _uiState.value.selectedVehicle
+        val importedVehicleNames = importedEntries.map { it.vehicleName }.filter { it.isNotBlank() }.distinct()
+        val matchingVehicle = _uiState.value.vehiclesList.firstOrNull { v ->
+            importedEntries.any { it.matchesVehicle(v) }
+        } ?: VehicleCatalog.defaultVehicles.firstOrNull { v ->
+            importedEntries.any { it.matchesVehicle(v) }
+        } ?: if (importedVehicleNames.isNotEmpty()) {
+            val first = importedEntries.first()
+            Vehicle(
+                id = first.vehicleId.ifBlank { first.vehicleName.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]"), "_").trim('_') },
+                name = first.vehicleName,
+                type = first.vehicleType
+            )
+        } else currentVehicle
+
+        // Garante que o veículo faça parte da lista de veículos do app
+        val updatedVehicles = if (_uiState.value.vehiclesList.none { it.id == matchingVehicle.id || it.name.equals(matchingVehicle.name, ignoreCase = true) }) {
+            _uiState.value.vehiclesList + matchingVehicle
+        } else {
+            _uiState.value.vehiclesList
+        }
+
+        val currentEnergyPrice = if (_uiState.value.homeEnergyPrice > 0.0) _uiState.value.homeEnergyPrice else 1.30
+        val currentPublicPrice = if (_uiState.value.publicEnergyPrice > 0.0) _uiState.value.publicEnergyPrice else 2.10
+        val currentGasPrice = if (_uiState.value.gasolinePrice > 0.0) _uiState.value.gasolinePrice else 6.50
+
+        // Enriquecer e calibrar cada viagem importada para garantir o cálculo perfeito dos custos
+        val enrichedEntries = importedEntries.map { entry ->
+            val v = updatedVehicles.find { entry.matchesVehicle(it) } ?: matchingVehicle
+            val effBatCap = if (entry.batteryCapacityKwh > 0.0) entry.batteryCapacityKwh else v.batteryCapacityKwh
+            val effElecCons = if (entry.electricConsumptionKwh100km > 0.0) entry.electricConsumptionKwh100km else v.electricConsumptionKwh100km
+            val effGasCons = if (entry.gasolineConsumptionKmL > 0.0) entry.gasolineConsumptionKmL else v.gasolineConsumptionKmL
+
+            val effGasPrice = if (entry.gasPriceLiter > 0.0) entry.gasPriceLiter else currentGasPrice
+            val effHomeEnergyPrice = if (entry.homeEnergyPrice > 0.0) entry.homeEnergyPrice else if (entry.energyPriceKwh > 0.0) entry.energyPriceKwh else currentEnergyPrice
+            val effPublicEnergyPrice = if (entry.publicEnergyPrice > 0.0) entry.publicEnergyPrice else currentPublicPrice
+
+            val effFuelLiters = if (entry.fuelLiters > 0.0) {
+                entry.fuelLiters
+            } else if (entry.hevKm > 0.0) {
+                val kml = if (entry.averageHevKmL > 0.0) entry.averageHevKmL else effGasCons
+                if (kml > 0.0) entry.hevKm / kml else 0.0
+            } else 0.0
+
+            val count = entry.rechargeCount.coerceAtLeast(1)
+            val effRechargeLocs = if (entry.rechargeLocations.isNotEmpty()) entry.rechargeLocations else List(count) { entry.chargingLocation }
+            val effRechargeFinals = if (entry.rechargeBatteryPercents.isNotEmpty()) entry.rechargeBatteryPercents else List(count) { entry.batteryMaxPercent }
+            val effRechargeInits = if (entry.rechargeInitialBatteryPercents.isNotEmpty()) entry.rechargeInitialBatteryPercents else List(count) { entry.batteryStartPercent }
+
+            val totalKmCalculated = if (entry.totalKm > 0.0) entry.totalKm else (entry.evKm + entry.hevKm)
+
+            entry.copy(
+                vehicleId = v.id,
+                vehicleName = v.name,
+                vehicleType = v.type,
+                totalKm = totalKmCalculated,
+                batteryCapacityKwh = effBatCap,
+                electricConsumptionKwh100km = effElecCons,
+                gasolineConsumptionKmL = effGasCons,
+                gasPriceLiter = effGasPrice,
+                energyPriceKwh = effHomeEnergyPrice,
+                homeEnergyPrice = effHomeEnergyPrice,
+                publicEnergyPrice = effPublicEnergyPrice,
+                fuelLiters = effFuelLiters,
+                rechargeCount = count,
+                rechargeLocations = effRechargeLocs,
+                rechargeBatteryPercents = effRechargeFinals,
+                rechargeInitialBatteryPercents = effRechargeInits
+            )
+        }
+
+        val currentEntries = _uiState.value.odometerEntries
+        // Se as viagens atuais no banco forem apenas as viagens simuladas de teste do Exemplo PHEV ou Jaecoo 8 legado, descartá-las para não poluir
+        val isDummyOnly = currentEntries.isNotEmpty() && currentEntries.all {
+            it.vehicleId == ExamplePhevTestData.VEHICLE_ID || it.vehicleId == "jaecoo_8"
+        }
+        val baseEntries = if (isDummyOnly || replaceAll) emptyList() else currentEntries
+
+        val updatedList = if (replaceAll || isDummyOnly) {
+            enrichedEntries.sortedByDescending { it.timestamp }
+        } else {
+            val map = baseEntries.associateBy { it.id }.toMutableMap()
+            enrichedEntries.forEach { entry ->
+                map[entry.id] = entry
+            }
+            map.values.sortedByDescending { it.timestamp }
+        }
+
+        prefs.saveOdometerEntries(updatedList)
+        prefs.saveVehiclesList(updatedVehicles)
+        prefs.saveSelectedVehicleId(matchingVehicle.id)
+
+        // 2. Atualiza a quilometragem inicial com base na última viagem importada do veículo
+        val vehicleTrips = updatedList.filter { it.matchesVehicle(matchingVehicle) }
+        val lastTrip = vehicleTrips.maxByOrNull { it.timestamp }
+        var newStartTotal = _uiState.value.odometerTotalStartKm
+        var newStartHev = _uiState.value.odometerHevStartKm
+
+        if (lastTrip != null) {
+            val latestEndTotal = if (lastTrip.totalEndKm > 0) lastTrip.totalEndKm else (lastTrip.totalStartKm + lastTrip.totalKm)
+            val latestEndHev = if (lastTrip.hevEndKm > 0) lastTrip.hevEndKm else (lastTrip.hevStartKm + lastTrip.hevKm)
+            if (latestEndTotal > 0) {
+                newStartTotal = latestEndTotal
+                newStartHev = latestEndHev
+                prefs.saveVehicleOdometerDraft(matchingVehicle.id, latestEndTotal, 0.0, latestEndHev, 0.0, 0.0, "")
+            }
+        }
+
+        // 3. Atualiza imediatamente o UI State na thread principal com o veículo correspondente selecionado
+        _uiState.update {
+            it.copy(
+                vehiclesList = updatedVehicles,
+                selectedVehicle = matchingVehicle,
+                odometerEntries = updatedList,
+                odometerTotalStartKm = newStartTotal,
+                odometerTotalEndKm = 0.0,
+                odometerHevStartKm = newStartHev,
+                odometerHevEndKm = 0.0,
+                odometerFilterVehicleOnly = true
+            )
+        }
+
+        // 4. Salva no banco de dados Room de forma assíncrona
+        viewModelScope.launch {
+            if (replaceAll || isDummyOnly) {
+                tripRepository.deleteAllTrips()
+            }
+            tripRepository.insertTrips(enrichedEntries)
+        }
+
+        val msg = if (_uiState.value.language == AppLanguage.EN_US) {
+            "${enrichedEntries.size} trips imported successfully (${matchingVehicle.name})!"
+        } else {
+            "${enrichedEntries.size} viagens importadas com sucesso (${matchingVehicle.name})!"
+        }
+        showToast(msg)
+    }
+
+    /**
+     * Gera os dados de teste de 1 ano para o veículo "Exemplo PHEV".
+     * Seleciona automaticamente o veículo Exemplo PHEV se necessário e preenche os odômetros anteriores.
+     */
+    fun seedExampleTestData() {
+        viewModelScope.launch {
+            val testTrips = ExamplePhevTestData.generateOneYearTrips()
+            tripRepository.insertTrips(testTrips)
+            val exampleVehicle = _uiState.value.vehiclesList.find { it.id == ExamplePhevTestData.VEHICLE_ID }
+                ?: VehicleCatalog.defaultVehicles.find { it.id == ExamplePhevTestData.VEHICLE_ID }
+            if (exampleVehicle != null && _uiState.value.selectedVehicle.id != ExamplePhevTestData.VEHICLE_ID) {
+                selectVehicle(exampleVehicle)
+            } else {
+                _uiState.update {
+                    it.copy(
+                        odometerTotalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+                        odometerHevStartKm = ExamplePhevTestData.LAST_HEV_END_KM
+                    )
+                }
+                prefs.saveVehicleOdometerDraft(
+                    vehicleId = ExamplePhevTestData.VEHICLE_ID,
+                    totalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+                    totalEndKm = _uiState.value.odometerTotalEndKm,
+                    hevStartKm = ExamplePhevTestData.LAST_HEV_END_KM,
+                    hevEndKm = _uiState.value.odometerHevEndKm,
+                    fuelLiters = _uiState.value.odometerFuelLiters,
+                    tripNote = _uiState.value.odometerTripNote
+                )
+                saveOdometerDraft()
+            }
+            val msg = if (_uiState.value.language == AppLanguage.EN_US) {
+                "44 example trips generated for Exemplo PHEV (1 full year)!"
+            } else {
+                "44 viagens de exemplo geradas para o Exemplo PHEV (1 ano completo)!"
+            }
+            showToast(msg)
+        }
+    }
+
+    /**
+     * Garante que os odômetros anteriores estejam preenchidos com base na última viagem do veículo ou no exemplo de 1 ano.
+     */
+    fun ensureVehicleBaselineLoaded() {
+        val s = _uiState.value
+        val isExample = s.selectedVehicle.id == ExamplePhevTestData.VEHICLE_ID
+        val needsBaseline = s.odometerTotalStartKm <= 0.0 || (isExample && (s.odometerTotalStartKm <= 0.0 || s.odometerHevStartKm <= 0.0))
+
+        if (needsBaseline) {
+            val vehicleEntries = s.odometerEntries.filter { it.matchesVehicle(s.selectedVehicle) }
+            val lastTrip = vehicleEntries.maxByOrNull { it.timestamp }
+            if (lastTrip != null && lastTrip.totalEndKm > 0.0) {
+                val startTot = lastTrip.totalEndKm
+                val startHev = if (s.selectedVehicle.type == VehicleType.PHEV) {
+                    if (lastTrip.hevEndKm > 0) lastTrip.hevEndKm else lastTrip.hevStartKm
+                } else 0.0
+                _uiState.update {
+                    it.copy(
+                        odometerTotalStartKm = startTot,
+                        odometerHevStartKm = startHev
+                    )
+                }
+                prefs.saveVehicleOdometerDraft(
+                    vehicleId = s.selectedVehicle.id,
+                    totalStartKm = startTot,
+                    totalEndKm = s.odometerTotalEndKm,
+                    hevStartKm = startHev,
+                    hevEndKm = s.odometerHevEndKm,
+                    fuelLiters = s.odometerFuelLiters,
+                    tripNote = s.odometerTripNote
+                )
+                saveOdometerDraft()
+            } else if (isExample) {
+                _uiState.update {
+                    it.copy(
+                        odometerTotalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+                        odometerHevStartKm = ExamplePhevTestData.LAST_HEV_END_KM
+                    )
+                }
+                prefs.saveVehicleOdometerDraft(
+                    vehicleId = ExamplePhevTestData.VEHICLE_ID,
+                    totalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+                    totalEndKm = s.odometerTotalEndKm,
+                    hevStartKm = ExamplePhevTestData.LAST_HEV_END_KM,
+                    hevEndKm = s.odometerHevEndKm,
+                    fuelLiters = s.odometerFuelLiters,
+                    tripNote = s.odometerTripNote
+                )
+                saveOdometerDraft()
+            }
+        }
+    }
+
+    /**
+     * Restaura os odômetros anteriores do Exemplo PHEV para os valores finais de 1 ano (16.400 km Total / 6.595 km HEV).
+     */
+    fun restoreExampleBaselineOdometers() {
+        _uiState.update {
+            it.copy(
+                odometerTotalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+                odometerHevStartKm = ExamplePhevTestData.LAST_HEV_END_KM,
+                odometerTotalEndKm = 0.0,
+                odometerHevEndKm = 0.0,
+                odometerFuelLiters = 0.0
+            )
+        }
+        prefs.saveVehicleOdometerDraft(
+            vehicleId = ExamplePhevTestData.VEHICLE_ID,
+            totalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+            totalEndKm = 0.0,
+            hevStartKm = ExamplePhevTestData.LAST_HEV_END_KM,
+            hevEndKm = 0.0,
+            fuelLiters = 0.0,
+            tripNote = ""
+        )
+        saveOdometerDraft()
+        val msg = if (_uiState.value.language == AppLanguage.EN_US) {
+            "Previous odometers restored: 16,400 km Total / 6,595 km HEV"
+        } else {
+            "Odômetros anteriores restaurados: 16.400 km Total / 6.595 km HEV"
+        }
+        showToast(msg)
+    }
+
+    /**
+     * Preenche os campos da viagem com valores de demonstração para testar o cálculo instantâneo da viagem (+270 km).
+     */
+    fun loadExampleDemoTrip() {
+        _uiState.update {
+            it.copy(
+                odometerTotalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+                odometerTotalEndKm = ExamplePhevTestData.DEMO_TOTAL_END_KM,
+                odometerHevStartKm = ExamplePhevTestData.LAST_HEV_END_KM,
+                odometerHevEndKm = ExamplePhevTestData.DEMO_HEV_END_KM,
+                odometerFuelLiters = ExamplePhevTestData.DEMO_FUEL_LITERS,
+                odometerTripNote = ExamplePhevTestData.DEMO_TRIP_TITLE,
+                odometerChargingLocation = ChargingLocation.HOME,
+                odometerUseHomeTariff = true,
+                odometerRechargeCount = 2,
+                odometerBatteryStartPercent = 100.0,
+                odometerBatteryMaxPercent = 75.0
+            )
+        }
+        prefs.saveVehicleOdometerDraft(
+            vehicleId = ExamplePhevTestData.VEHICLE_ID,
+            totalStartKm = ExamplePhevTestData.LAST_TOTAL_END_KM,
+            totalEndKm = ExamplePhevTestData.DEMO_TOTAL_END_KM,
+            hevStartKm = ExamplePhevTestData.LAST_HEV_END_KM,
+            hevEndKm = ExamplePhevTestData.DEMO_HEV_END_KM,
+            fuelLiters = ExamplePhevTestData.DEMO_FUEL_LITERS,
+            tripNote = ExamplePhevTestData.DEMO_TRIP_TITLE
+        )
+        saveOdometerDraft()
+        val msg = if (_uiState.value.language == AppLanguage.EN_US) {
+            "Demo trip pre-filled (+270 km, 4.0 L fuel)!"
+        } else {
+            "Viagem de demonstração preenchida (+270 km, 4,0 L combustível)!"
+        }
+        showToast(msg)
+    }
+
+    /**
+     * Remove todos os dados de teste do Exemplo PHEV.
+     */
+    fun removeExampleTestData() {
+        viewModelScope.launch {
+            tripRepository.deleteTripsByVehicle(ExamplePhevTestData.VEHICLE_ID, ExamplePhevTestData.VEHICLE_NAME)
+            val msg = if (_uiState.value.language == AppLanguage.EN_US) {
+                "Example trips deleted!"
+            } else {
+                "Viagens de exemplo excluídas com sucesso!"
+            }
+            showToast(msg)
+        }
+    }
+
+    fun seedJaecoo8TestData() = seedExampleTestData()
+    fun removeJaecoo8TestData() {
+        viewModelScope.launch {
+            tripRepository.deleteTripsByVehicle("jaecoo_8", "Jaecoo 8 PHEV")
+            showToast("Dados do Jaecoo 8 limpos!")
+        }
     }
 
     fun generateOdometerShareText(): String {
@@ -1261,10 +2642,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             appendLine(if (isEn) "📏 Total Distance: ${formatNumber(s.odometerEffectiveTotalKm, 1, s.language)} km" else "📏 Distância Total: ${formatNumber(s.odometerEffectiveTotalKm, 1, s.language)} km")
             appendLine(if (isEn) "  • Previous: ${formatNumber(s.odometerTotalStartKm, 1, s.language)} km | Current: ${formatNumber(s.odometerTotalEndKm, 1, s.language)} km" else "  • Anterior: ${formatNumber(s.odometerTotalStartKm, 1, s.language)} km | Atual: ${formatNumber(s.odometerTotalEndKm, 1, s.language)} km")
             appendLine(if (isEn) "⚡ Electric (EV): ${formatNumber(s.odometerEffectiveEvKm, 1, s.language)} km (${formatNumber(s.odometerEvPercent, 1, s.language)}%)" else "⚡ Modo Elétrico (EV): ${formatNumber(s.odometerEffectiveEvKm, 1, s.language)} km (${formatNumber(s.odometerEvPercent, 1, s.language)}%)")
+            if (s.odometerExcessEvKm > 0) {
+                appendLine(if (isEn) "  ↳ Plug Recharge: ${formatNumber(s.odometerRechargeEvKm, 1, s.language)} km | Engine/Regen: ${formatNumber(s.odometerExcessEvKm, 1, s.language)} km" else "  ↳ Recarga da Tomada: ${formatNumber(s.odometerRechargeEvKm, 1, s.language)} km | Motor/Regen: ${formatNumber(s.odometerExcessEvKm, 1, s.language)} km")
+            }
             appendLine(if (isEn) "⛽ Hybrid (HEV): ${formatNumber(s.odometerEffectiveHevKm, 1, s.language)} km (${formatNumber(s.odometerHevPercent, 1, s.language)}%)" else "⛽ Modo Híbrido (HEV): ${formatNumber(s.odometerEffectiveHevKm, 1, s.language)} km (${formatNumber(s.odometerHevPercent, 1, s.language)}%)")
+            if (s.odometerExcessEvKm > 0) {
+                appendLine(if (isEn) "  ↳ Effective Fuel Distance: ${formatNumber(s.odometerEffectiveFuelKm, 1, s.language)} km" else "  ↳ Km Efetivos a Combustível: ${formatNumber(s.odometerEffectiveFuelKm, 1, s.language)} km")
+            }
+            if (s.odometerAverageHevKmL > 0) {
+                appendLine(if (isEn) "⛽ Average HEV Consumption: ${formatNumber(s.odometerAverageHevKmL, 2, s.language)} km/L" else "⛽ Consumo Médio HEV: ${formatNumber(s.odometerAverageHevKmL, 2, s.language)} km/L")
+            }
+            if (s.odometerGlobalKmL > 0) {
+                appendLine(if (isEn) "🌐 Global Trip Consumption: ${formatNumber(s.odometerGlobalKmL, 2, s.language)} km/L" else "🌐 Consumo Médio Global: ${formatNumber(s.odometerGlobalKmL, 2, s.language)} km/L")
+            }
             appendLine("━━━━━━━━━━━━━━━━━━━━━")
             appendLine(if (isEn) "💰 Total Trip Cost: ${formatCurrency(s.odometerTotalTripCost, s.language)}" else "💰 Custo Total do Trajeto: ${formatCurrency(s.odometerTotalTripCost, s.language)}")
-            appendLine(if (isEn) "  • Electric: ${formatCurrency(s.odometerElectricCost, s.language)} (${formatNumber(s.odometerTotalEnergyKwh, 1, s.language)} kWh)" else "  • Elétrico: ${formatCurrency(s.odometerElectricCost, s.language)} (${formatNumber(s.odometerTotalEnergyKwh, 1, s.language)} kWh)")
+
+            val homeCount = s.odometerEffectiveRechargeLocations.count { it == ChargingLocation.HOME }
+            val stationCount = s.odometerEffectiveRechargeLocations.count { it == ChargingLocation.STATION }
+            val rechBreakdown = if (s.odometerRechargeCount > 1) {
+                if (homeCount > 0 && stationCount > 0) {
+                    if (isEn) " (${homeCount}x Home, ${stationCount}x Station)" else " (${homeCount}x Casa, ${stationCount}x Posto)"
+                } else if (homeCount > 0) {
+                    if (isEn) " (${homeCount}x Home)" else " (${homeCount}x Casa)"
+                } else {
+                    if (isEn) " (${stationCount}x Station)" else " (${stationCount}x Posto)"
+                }
+            } else ""
+
+            appendLine(if (isEn) "  • Electric: ${formatCurrency(s.odometerElectricCost, s.language)} (${formatNumber(s.odometerTotalEnergyKwh, 1, s.language)} kWh$rechBreakdown)" else "  • Elétrico: ${formatCurrency(s.odometerElectricCost, s.language)} (${formatNumber(s.odometerTotalEnergyKwh, 1, s.language)} kWh$rechBreakdown)")
             appendLine(if (isEn) "  • Gasoline: ${formatCurrency(s.odometerGasolineCost, s.language)} (${formatNumber(s.odometerTotalGasolineLiters, 1, s.language)} L)" else "  • Gasolina: ${formatCurrency(s.odometerGasolineCost, s.language)} (${formatNumber(s.odometerTotalGasolineLiters, 1, s.language)} L)")
             appendLine(if (isEn) "📊 Cost per km: ${formatCurrency(s.odometerCostPerKm, s.language)}/km (${formatCurrency(s.odometerCostPer100Km, s.language)} / 100 km)" else "📊 Custo por km: ${formatCurrency(s.odometerCostPerKm, s.language)}/km (${formatCurrency(s.odometerCostPer100Km, s.language)} / 100 km)")
             appendLine("━━━━━━━━━━━━━━━━━━━━━")

@@ -166,23 +166,6 @@ fun EconomyScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Image Manager
-                IconButton(
-                    onClick = { viewModel.openImageManagerDialog(true) },
-                    modifier = Modifier
-                        .size(40.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(VoltageSurfaceContainerHigh)
-                        .testTag("action_image_manager")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Image,
-                        contentDescription = strings.manageVehicleImage,
-                        tint = VoltageOnSurface,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-
                 // Share
                 IconButton(
                     onClick = { shareAppSummary(context, state) },

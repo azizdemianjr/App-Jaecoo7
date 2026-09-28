@@ -8,11 +8,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.BarChart
 import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material.icons.filled.ElectricBolt
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Savings
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.Calculate
 import androidx.compose.material.icons.outlined.ElectricBolt
 import androidx.compose.material.icons.outlined.Info
@@ -77,18 +79,24 @@ fun BottomNavBar(
                 testTag = "nav_economy"
             )
         )
-        // Odômetro is only active for PHEV vehicles
-        if (isPhev) {
-            add(
-                NavItem(
-                    tab = NavigationTab.ODOMETER,
-                    label = strings.navOdometer,
-                    selectedIcon = Icons.Filled.Speed,
-                    unselectedIcon = Icons.Outlined.Speed,
-                    testTag = "nav_odometer"
-                )
+        add(
+            NavItem(
+                tab = NavigationTab.ODOMETER,
+                label = strings.navOdometer,
+                selectedIcon = Icons.Filled.Speed,
+                unselectedIcon = Icons.Outlined.Speed,
+                testTag = "nav_odometer"
             )
-        }
+        )
+        add(
+            NavItem(
+                tab = NavigationTab.CHARTS,
+                label = strings.navCharts,
+                selectedIcon = Icons.Filled.BarChart,
+                unselectedIcon = Icons.Outlined.BarChart,
+                testTag = "nav_charts"
+            )
+        )
         add(
             NavItem(
                 tab = NavigationTab.CHARGING_TIME,

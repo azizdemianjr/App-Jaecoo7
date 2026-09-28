@@ -1,0 +1,8 @@
+Backup: Antes do dados Rom
+Data: 2026-09-22
+Descricao: Ponto de restauracao estavel antes da implementacao da persistencia de dados com Room Database.
+Contem:
+- Odometros EV e HEV completos com calculo de diferenca na ultima linha.
+- Item 1 posicionado como Nome da Viagem (Opcional) com renumberacao dos itens subsequentes.
+- Chave PIX atualizada para 48565a78-f69d-4a0f-917d-f327331b6c6c com design responsivo.
+- Sistema de recargas, calculo de combustivel, consumo e graficos funcionando perfeitamente.

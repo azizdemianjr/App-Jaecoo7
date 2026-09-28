@@ -45,6 +45,14 @@ class AppPreferences(context: Context) {
         private const val KEY_ODOMETER_HEV_END_KM = "odometer_hev_end_km"
         private const val KEY_ODOMETER_FUEL_LITERS = "odometer_fuel_liters"
         private const val KEY_ODOMETER_TRIP_NOTE = "odometer_trip_note"
+        private const val KEY_ODOMETER_BATTERY_MAX_PERCENT = "odometer_battery_max_percent"
+        private const val KEY_ODOMETER_BATTERY_START_PERCENT = "odometer_battery_start_percent"
+        private const val KEY_ODOMETER_CHARGING_LOCATION = "odometer_charging_location"
+        private const val KEY_ODOMETER_RECHARGE_COUNT = "odometer_recharge_count"
+        private const val KEY_ODOMETER_RECHARGE_LOCATIONS = "odometer_recharge_locations"
+        private const val KEY_ODOMETER_RECHARGE_BATTERY_PERCENTS = "odometer_recharge_battery_percents"
+        private const val KEY_ODOMETER_RECHARGE_INITIAL_BATTERY_PERCENTS = "odometer_recharge_initial_battery_percents"
+        private const val KEY_ODOMETER_RECHARGE_PRICES = "odometer_recharge_prices"
     }
 
     fun saveLastSyncTimestamp(timestamp: Long) {
@@ -292,17 +300,9 @@ class AppPreferences(context: Context) {
             .commit()
     }
 
-    fun getOdometerDraftTotalKm(): Double {
-        return if (prefs.contains(KEY_ODOMETER_TOTAL_KM)) {
-            prefs.getFloat(KEY_ODOMETER_TOTAL_KM, 100.0f).toDouble()
-        } else {
-            val ev = prefs.getFloat(KEY_ODOMETER_EV_KM, 60.0f).toDouble()
-            val hev = prefs.getFloat(KEY_ODOMETER_HEV_KM, 40.0f).toDouble()
-            ev + hev
-        }
-    }
+    fun getOdometerDraftTotalKm(): Double = prefs.getFloat(KEY_ODOMETER_TOTAL_KM, 0.0f).toDouble()
 
-    fun getOdometerDraftHevKm(): Double = prefs.getFloat(KEY_ODOMETER_HEV_KM, 40.0f).toDouble()
+    fun getOdometerDraftHevKm(): Double = prefs.getFloat(KEY_ODOMETER_HEV_KM, 0.0f).toDouble()
     fun getOdometerDraftUseHomeTariff(): Boolean = prefs.getBoolean(KEY_ODOMETER_USE_HOME_TARIFF, true)
 
     fun saveOdometerDraft(
@@ -325,15 +325,131 @@ class AppPreferences(context: Context) {
 
     fun getOdometerDraftTotalStartKm(): Double = prefs.getFloat(KEY_ODOMETER_TOTAL_START_KM, 0.0f).toDouble()
 
-    fun getOdometerDraftTotalEndKm(): Double = prefs.getFloat(KEY_ODOMETER_TOTAL_END_KM, 1000.0f).toDouble()
+    fun getOdometerDraftTotalEndKm(): Double = prefs.getFloat(KEY_ODOMETER_TOTAL_END_KM, 0.0f).toDouble()
 
     fun getOdometerDraftHevStartKm(): Double = prefs.getFloat(KEY_ODOMETER_HEV_START_KM, 0.0f).toDouble()
 
-    fun getOdometerDraftHevEndKm(): Double = prefs.getFloat(KEY_ODOMETER_HEV_END_KM, 100.0f).toDouble()
+    fun getOdometerDraftHevEndKm(): Double = prefs.getFloat(KEY_ODOMETER_HEV_END_KM, 0.0f).toDouble()
 
-    fun getOdometerDraftFuelLiters(): Double = prefs.getFloat(KEY_ODOMETER_FUEL_LITERS, 6.25f).toDouble()
+    fun getOdometerDraftFuelLiters(): Double = prefs.getFloat(KEY_ODOMETER_FUEL_LITERS, 0.0f).toDouble()
 
     fun getOdometerDraftTripNote(): String = prefs.getString(KEY_ODOMETER_TRIP_NOTE, "") ?: ""
+
+    fun saveVehicleOdometerDraft(
+        vehicleId: String,
+        totalStartKm: Double,
+        totalEndKm: Double,
+        hevStartKm: Double,
+        hevEndKm: Double,
+        fuelLiters: Double = 0.0,
+        tripNote: String = ""
+    ) {
+        if (vehicleId.isBlank()) return
+        val safeKey = "vehicle_odo_draft_${vehicleId}"
+        val obj = JSONObject().apply {
+            put("totalStartKm", totalStartKm)
+            put("totalEndKm", totalEndKm)
+            put("hevStartKm", hevStartKm)
+            put("hevEndKm", hevEndKm)
+            put("fuelLiters", fuelLiters)
+            put("tripNote", tripNote)
+        }
+        prefs.edit().putString(safeKey, obj.toString()).apply()
+    }
+
+    fun getVehicleOdometerDraft(vehicleId: String): VehicleOdometerDraft? {
+        if (vehicleId.isBlank()) return null
+        val safeKey = "vehicle_odo_draft_${vehicleId}"
+        val str = prefs.getString(safeKey, null) ?: return null
+        return try {
+            val obj = JSONObject(str)
+            VehicleOdometerDraft(
+                totalStartKm = obj.optDouble("totalStartKm", 0.0),
+                totalEndKm = obj.optDouble("totalEndKm", 0.0),
+                hevStartKm = obj.optDouble("hevStartKm", 0.0),
+                hevEndKm = obj.optDouble("hevEndKm", 0.0),
+                fuelLiters = obj.optDouble("fuelLiters", 0.0),
+                tripNote = obj.optString("tripNote", "")
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    fun saveOdometerBatteryMaxPercent(percent: Double) {
+        prefs.edit().putFloat(KEY_ODOMETER_BATTERY_MAX_PERCENT, percent.toFloat()).commit()
+    }
+
+    fun getOdometerBatteryMaxPercent(): Double = prefs.getFloat(KEY_ODOMETER_BATTERY_MAX_PERCENT, 75.0f).toDouble()
+
+    fun saveOdometerBatteryStartPercent(percent: Double) {
+        prefs.edit().putFloat(KEY_ODOMETER_BATTERY_START_PERCENT, percent.toFloat()).commit()
+    }
+
+    fun getOdometerBatteryStartPercent(): Double = prefs.getFloat(KEY_ODOMETER_BATTERY_START_PERCENT, 100.0f).toDouble()
+
+    fun saveOdometerChargingLocation(location: ChargingLocation) {
+        prefs.edit().putString(KEY_ODOMETER_CHARGING_LOCATION, location.name).commit()
+    }
+
+    fun getOdometerChargingLocation(): ChargingLocation {
+        val str = prefs.getString(KEY_ODOMETER_CHARGING_LOCATION, null)
+        if (str != null) {
+            try {
+                val loc = ChargingLocation.valueOf(str)
+                if (loc != ChargingLocation.NONE) return loc
+            } catch (e: Exception) {}
+        }
+        return ChargingLocation.HOME
+    }
+
+    fun saveOdometerRechargeCount(count: Int) {
+        prefs.edit().putInt(KEY_ODOMETER_RECHARGE_COUNT, count.coerceAtLeast(1)).commit()
+    }
+
+    fun getOdometerRechargeCount(): Int = prefs.getInt(KEY_ODOMETER_RECHARGE_COUNT, 1).coerceAtLeast(1)
+
+    fun saveOdometerRechargeLocations(locations: List<ChargingLocation>) {
+        val csv = locations.joinToString(",") { it.name }
+        prefs.edit().putString(KEY_ODOMETER_RECHARGE_LOCATIONS, csv).commit()
+    }
+
+    fun getOdometerRechargeLocations(): List<ChargingLocation> {
+        val csv = prefs.getString(KEY_ODOMETER_RECHARGE_LOCATIONS, null) ?: return listOf(ChargingLocation.HOME)
+        return csv.split(",").mapNotNull {
+            try { ChargingLocation.valueOf(it) } catch (e: Exception) { null }
+        }.ifEmpty { listOf(ChargingLocation.HOME) }
+    }
+
+    fun saveOdometerRechargeBatteryPercents(percents: List<Double>) {
+        val csv = percents.joinToString(",") { it.toString() }
+        prefs.edit().putString(KEY_ODOMETER_RECHARGE_BATTERY_PERCENTS, csv).commit()
+    }
+
+    fun getOdometerRechargeBatteryPercents(): List<Double> {
+        val csv = prefs.getString(KEY_ODOMETER_RECHARGE_BATTERY_PERCENTS, null) ?: return emptyList()
+        return csv.split(",").mapNotNull { it.toDoubleOrNull() }
+    }
+
+    fun saveOdometerRechargeInitialBatteryPercents(percents: List<Double>) {
+        val csv = percents.joinToString(",") { it.toString() }
+        prefs.edit().putString(KEY_ODOMETER_RECHARGE_INITIAL_BATTERY_PERCENTS, csv).commit()
+    }
+
+    fun getOdometerRechargeInitialBatteryPercents(): List<Double> {
+        val csv = prefs.getString(KEY_ODOMETER_RECHARGE_INITIAL_BATTERY_PERCENTS, null) ?: return emptyList()
+        return csv.split(",").mapNotNull { it.toDoubleOrNull() }
+    }
+
+    fun saveOdometerRechargePrices(prices: List<Double>) {
+        val csv = prices.joinToString(",") { it.toString() }
+        prefs.edit().putString(KEY_ODOMETER_RECHARGE_PRICES, csv).commit()
+    }
+
+    fun getOdometerRechargePrices(): List<Double> {
+        val csv = prefs.getString(KEY_ODOMETER_RECHARGE_PRICES, null) ?: return emptyList()
+        return csv.split(",").mapNotNull { it.toDoubleOrNull() }
+    }
 
     fun clearAll() {
         prefs.edit().clear().commit()

@@ -12,9 +12,9 @@ data class Vehicle(
     val brand: String = "",
     val type: VehicleType = VehicleType.PHEV,
     val tag: String = type.label,
-    val batteryCapacityKwh: Double,
-    val electricConsumptionKwh100km: Double,
-    val gasolineConsumptionKmL: Double,
+    val batteryCapacityKwh: Double = 34.46,
+    val electricConsumptionKwh100km: Double = 17.5,
+    val gasolineConsumptionKmL: Double = 13.5,
     val maxAcChargeKw: Double = 7.0,
     val imageUrl: String = "",
     val isCustom: Boolean = false
@@ -22,6 +22,20 @@ data class Vehicle(
 
 object VehicleCatalog {
     val defaultVehicles = listOf(
+        // ==================== EXEMPLO DE DEMONSTRAÇÃO ====================
+        Vehicle(
+            id = "exemplo_phev",
+            name = "Exemplo PHEV",
+            brand = "Exemplo",
+            type = VehicleType.PHEV,
+            tag = "Híbrido Plug-in (Exemplo)",
+            batteryCapacityKwh = 34.4,
+            electricConsumptionKwh100km = 22.50,
+            gasolineConsumptionKmL = 14.50,
+            maxAcChargeKw = 7.0,
+            imageUrl = "https://images.unsplash.com/photo-1549399542-7e3f8b79c341?w=800&auto=format&fit=crop&q=80"
+        ),
+
         // ==================== BYD ====================
         Vehicle(
             id = "dolphin_mini",
